@@ -17,8 +17,7 @@ ma120-monitor/
 ├── stock_monitor.py             # 旧版（保留备查）
 ├── stock_portfolio_monitor.py   # 旧版（保留备查）
 ├── backtest_ma120_strategy.py   # MA120 策略回测工具
-├── portfolio.csv                # 持仓清单：code,name,cost,shares
-├── watchlist.csv                # 关注池：code,name
+├── stocks.xlsx                  # 数据源（sheet: portfolio / watchlist）
 └── .stock_cache/                # 日 K 行情缓存（一只一个 JSON）
 ```
 
@@ -40,23 +39,28 @@ python3 stock_dynamic_monitor.py --no-feishu
 
 ## 配置
 
-**持仓** — 编辑 `portfolio.csv`：
+编辑 `stocks.xlsx`，包含两个 sheet：
 
-```csv
-股票代码,股票名称,成本价,持仓数量
-600015,华夏银行,0,0
-601899,紫金矿业,0,0
-```
+**sheet `portfolio`** — 持仓清单：
+
+| 股票代码 | 股票名称 | 成本价 | 持仓数量 |
+|---|---|---|---|
+| 600015 | 华夏银行 | 0 | 0 |
+| 601899 | 紫金矿业 | 0 | 0 |
 
 > 成本价/数量留空或 0 表示不计算浮盈，只看信号。
+> 股票代码可写成文本或数字，脚本会自动补齐 6 位。
 
-**关注池** — 编辑 `watchlist.csv`：
+**sheet `watchlist`** — 关注池：
 
-```csv
-股票代码,股票名称
-601998,中信银行
-600989,宝丰能源
-```
+| 股票代码 | 股票名称 |
+|---|---|
+| 601998 | 中信银行 |
+| 600989 | 宝丰能源 |
+
+表头支持中文（`股票代码/股票名称/成本价/持仓数量`）或英文（`code/name/cost/shares`）。
+
+**依赖：** 需要 `openpyxl`（项目 venv 里已装）。
 
 **飞书推送** — 脚本顶部 `FEISHU_USER_ID` 指定接收人，发送通过 OpenClaw 的 `openclaw message send` CLI。
 
