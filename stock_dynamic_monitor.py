@@ -1,9 +1,9 @@
 """
 MA120 持仓 & 关注池监控（Sina 数据源）
 
-数据：从外部 CSV 读取（# 开头的行作为注释）
-  - portfolio.csv: 持仓 code,name,cost,shares  → 浮盈浮亏 + MA120 信号
-  - watchlist.csv: 关注池 code,name             → 仅 MA120 信号
+数据：从 stocks.xlsx 读取（两个 sheet）
+  - sheet "portfolio": 持仓 股票代码/股票名称/成本价/持仓数量 → 浮盈浮亏 + MA120 信号
+  - sheet "watchlist": 关注池 股票代码/股票名称                  → 仅 MA120 信号
 
 策略：
   - 买入线：MA120 × 0.88
@@ -23,7 +23,6 @@ import time
 import requests
 import os
 import json
-import csv
 import sys
 warnings.filterwarnings('ignore')
 
@@ -38,15 +37,16 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIR = os.path.join(BASE_DIR, ".stock_cache")
 CACHE_DAYS = 5
 
-PORTFOLIO_FILE = os.path.join(BASE_DIR, "portfolio.csv")
-WATCHLIST_FILE = os.path.join(BASE_DIR, "watchlist.csv")
+STOCKS_FILE = os.path.join(BASE_DIR, "stocks.xlsx")
+PORTFOLIO_SHEET = "portfolio"
+WATCHLIST_SHEET = "watchlist"
 
 # ============ 飞书 ============
 FEISHU_USER_ID = "ou_2eaab8f758ac6973826b4cf591791afb"
 
 
 # ---------- 数据文件加载 ----------
-# 列名别名：让 CSV 可以用中文或英文表头
+# 列名别名：让表头可以用中文或英文
 COLUMN_ALIASES = {
     "code": ["code", "股票代码", "代码"],
     "name": ["name", "股票名称", "名称"],
@@ -60,24 +60,12 @@ def _normalize_row(row: dict) -> dict:
     out = {}
     for canonical, aliases in COLUMN_ALIASES.items():
         for alias in aliases:
-            if alias in row and row[alias] != "":
+            if alias in row and row[alias] not in (None, ""):
                 out[canonical] = row[alias]
                 break
         else:
             out[canonical] = row.get(canonical, "")
     return out
-
-
-def _read_csv_rows(path: str) -> list:
-    """读 CSV，跳过 # 开头的注释行和空行，支持中英文列名"""
-    rows = []
-    with open(path, encoding="utf-8") as f:
-        cleaned = [ln for ln in f if ln.strip() and not ln.lstrip().startswith("#")]
-    reader = csv.DictReader(cleaned)
-    for row in reader:
-        clean = {k.strip(): (v.strip() if v else "") for k, v in row.items() if k}
-        rows.append(_normalize_row(clean))
-    return rows
 
 
 def _safe_float(v) -> float:
@@ -89,11 +77,43 @@ def _safe_float(v) -> float:
         return 0.0
 
 
+def _safe_code(v) -> str:
+    """Excel 会把纯数字代码读成 int（600015 → 600015），补齐到 6 位"""
+    if v is None:
+        return ""
+    s = str(v).strip()
+    if s.endswith(".0"):
+        s = s[:-2]
+    if s.isdigit() and len(s) < 6:
+        s = s.zfill(6)
+    return s
+
+
+def _read_xlsx_rows(path: str, sheet: str) -> list:
+    """读 xlsx 指定 sheet，返回列表[dict]，跳过空行和代码以 # 开头的注释行"""
+    df = pd.read_excel(path, sheet_name=sheet, dtype=str, engine="openpyxl")
+    df.columns = [str(c).strip() for c in df.columns]
+    rows = []
+    for _, r in df.iterrows():
+        raw = {k: ("" if pd.isna(v) else str(v).strip()) for k, v in r.items()}
+        # 全空行跳过
+        if not any(raw.values()):
+            continue
+        norm = _normalize_row(raw)
+        # 代码以 # 开头作为注释行
+        if str(norm.get("code", "")).lstrip().startswith("#"):
+            continue
+        norm["code"] = _safe_code(norm.get("code"))
+        rows.append(norm)
+    return rows
+
+
 def load_portfolio() -> list:
-    if not os.path.exists(PORTFOLIO_FILE):
+    if not os.path.exists(STOCKS_FILE):
+        print(f"⚠️ 未找到数据文件: {STOCKS_FILE}")
         return []
     try:
-        rows = _read_csv_rows(PORTFOLIO_FILE)
+        rows = _read_xlsx_rows(STOCKS_FILE, PORTFOLIO_SHEET)
         out = []
         for it in rows:
             if not it.get("code") or not it.get("name"):
@@ -106,15 +126,15 @@ def load_portfolio() -> list:
             })
         return out
     except Exception as e:
-        print(f"⚠️ 读取 {os.path.basename(PORTFOLIO_FILE)} 失败: {e}")
+        print(f"⚠️ 读取 {os.path.basename(STOCKS_FILE)}[{PORTFOLIO_SHEET}] 失败: {e}")
         return []
 
 
 def load_watchlist() -> list:
-    if not os.path.exists(WATCHLIST_FILE):
+    if not os.path.exists(STOCKS_FILE):
         return []
     try:
-        rows = _read_csv_rows(WATCHLIST_FILE)
+        rows = _read_xlsx_rows(STOCKS_FILE, WATCHLIST_SHEET)
         out = []
         for it in rows:
             if not it.get("code") or not it.get("name"):
@@ -122,7 +142,7 @@ def load_watchlist() -> list:
             out.append({"code": it["code"], "name": it["name"]})
         return out
     except Exception as e:
-        print(f"⚠️ 读取 {os.path.basename(WATCHLIST_FILE)} 失败: {e}")
+        print(f"⚠️ 读取 {os.path.basename(STOCKS_FILE)}[{WATCHLIST_SHEET}] 失败: {e}")
         return []
 
 
