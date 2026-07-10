@@ -35,7 +35,7 @@ DATA_DAYS = 200
 # ============ 缓存 ============
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIR = os.path.join(BASE_DIR, ".stock_cache")
-CACHE_DAYS = 5
+CACHE_DAYS = 1
 
 STOCKS_FILE = os.path.join(BASE_DIR, "stocks.xlsx")
 PORTFOLIO_SHEET = "portfolio"
@@ -237,14 +237,14 @@ def check_ma120_signal(df: pd.DataFrame) -> dict | None:
 
     if price < ma120 * BUY_THRESHOLD and prev_price >= prev_ma120 * BUY_THRESHOLD:
         result['signal'] = 'buy'
-        result['message'] = f"🔥 买入！{price:.2f} < 买入线 {buy_line:.2f}  偏离 {ma120_pct:.2f}%"
+        result['message'] = f"🔥 买入！{price:.2f} < 买入线 {buy_line:.2f}  MA120 {ma120:.2f}  偏离 {ma120_pct:.2f}%"
     elif price > ma120 * SELL_THRESHOLD and prev_price <= prev_ma120 * SELL_THRESHOLD:
         result['signal'] = 'sell'
-        result['message'] = f"📤 卖出！{price:.2f} > 卖出线 {sell_line:.2f}  偏离 {ma120_pct:.2f}%"
+        result['message'] = f"📤 卖出！{price:.2f} > 卖出线 {sell_line:.2f}  MA120 {ma120:.2f}  偏离 {ma120_pct:.2f}%"
     elif price >= ma120:
-        result['message'] = f"📈 高于 MA120  +{ma120_pct:.2f}%  卖出线 {sell_line:.2f}"
+        result['message'] = f"📈 高于 MA120 {ma120:.2f}  +{ma120_pct:.2f}%  卖出线 {sell_line:.2f}"
     else:
-        result['message'] = f"📊 低于 MA120  {ma120_pct:.2f}%  买入线 {buy_line:.2f}"
+        result['message'] = f"📊 低于 MA120 {ma120:.2f}  {ma120_pct:.2f}%  买入线 {buy_line:.2f}"
     return result
 
 
@@ -304,7 +304,7 @@ def render_portfolio_text(items: list, today: str) -> str:
         tag = _signal_tag(r)
         if r['signal'] in signal_count:
             signal_count[r['signal']] += 1
-        line = f"{tag}  {r['name']} ({r['code']})  现价 {r['price']:.2f}  偏离 {r['ma120_pct']:+.2f}%"
+        line = f"{tag}  {r['name']} ({r['code']})  现价 {r['price']:.2f}  MA120 {r['ma120']:.2f}  偏离 {r['ma120_pct']:+.2f}%"
         if r.get('cost') and r.get('shares'):
             pnl_pct = (r['price'] - r['cost']) / r['cost'] * 100
             value = r['price'] * r['shares']
@@ -349,7 +349,7 @@ def render_watchlist_text(items: list, today: str) -> str:
         tag = _signal_tag(r)
         if r['signal'] in signal_count:
             signal_count[r['signal']] += 1
-        line = f"{tag}  {r['name']} ({r['code']})  现价 {r['price']:.2f}  偏离 {r['ma120_pct']:+.2f}%"
+        line = f"{tag}  {r['name']} ({r['code']})  现价 {r['price']:.2f}  MA120 {r['ma120']:.2f}  偏离 {r['ma120_pct']:+.2f}%"
         if r['signal'] == 'buy':
             line += f"  → 买入线 {r['buy_line']:.2f}"
         elif r['signal'] == 'sell':
