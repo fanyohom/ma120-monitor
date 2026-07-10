@@ -7,9 +7,13 @@ MA120 高股息白马波段策略 - 历史回测
 import pandas as pd
 import numpy as np
 import akshare as ak
+import time
 from datetime import datetime, timedelta
 import warnings
 warnings.filterwarnings('ignore')
+
+# 复用监控脚本的 stocks.xlsx 读取逻辑
+from stock_dynamic_monitor import load_portfolio, load_watchlist
 
 # ============ 策略参数 ============
 MA_LONG = 120      # MA120
@@ -21,26 +25,34 @@ DIVIDEND_REINVEST_BELOW_MA60 = True  # 分红再投入条件：股价 < MA60
 # ============ 数据获取 ============
 def get_stock_data(stock_code: str, start_date: str, end_date: str) -> pd.DataFrame:
     """
-    获取 A 股历史数据（使用 akshare）
+    获取 A 股历史数据（akshare 新浪源 stock_zh_a_daily）
     stock_code: 股票代码，如 "600519"（茅台）、"600900"（长江电力）
+    start_date/end_date: YYYYMMDD 格式
     """
-    try:
-        # 尝试获取日线数据
-        df = ak.stock_zh_a_hist(
-            symbol=stock_code,
-            period="daily",
-            start_date=start_date,
-            end_date=end_date,
-            adjust="qfq"  # 前复权
-        )
-        df.columns = ['date', 'open', 'close', 'high', 'low', 'volume', 'amount', 'amplitude', 'change_pct', 'change_amount', 'turnover']
-        df['date'] = pd.to_datetime(df['date'])
-        df = df.set_index('date').sort_index()
-        df['close'] = df['close'].astype(float)
-        return df
-    except Exception as e:
-        print(f"  ❌ 获取 {stock_code} 数据失败: {e}")
-        return pd.DataFrame()
+    # 新浪源用 sh/sz 前缀代码
+    symbol = ("sh" if stock_code.startswith("6") else "sz") + stock_code
+    # 新浪源偶发网络抖动，失败后退避重试
+    last_err = None
+    for attempt in range(1, 5):
+        try:
+            df = ak.stock_zh_a_daily(
+                symbol=symbol,
+                start_date=start_date,
+                end_date=end_date,
+                adjust="qfq"  # 前复权
+            )
+            # 新浪源列名已是英文（date/open/high/low/close/volume...），仅统一 date 索引
+            df['date'] = pd.to_datetime(df['date'])
+            df = df.set_index('date').sort_index()
+            df['close'] = df['close'].astype(float)
+            return df
+        except Exception as e:
+            last_err = e
+            if attempt < 4:
+                print(f"  ⏳ 获取 {stock_code} 第 {attempt} 次失败，{attempt*2}s 后重试...")
+                time.sleep(attempt * 2)
+    print(f"  ❌ 获取 {stock_code} 数据失败（已重试 4 次）: {last_err}")
+    return pd.DataFrame()
 
 
 def get_dividend_data(stock_code: str) -> pd.DataFrame:
@@ -247,6 +259,66 @@ def run_backtest(stock_code: str, stock_name: str, start_date: str, end_date: st
     return result
 
 
+# ============ 结果持久化 ============
+def save_results(results: dict, start_date: str, end_date: str, overall_return: float) -> None:
+    """把回测结果落盘：JSON（完整含交易明细）+ Markdown（可读汇总）"""
+    import os, json
+    out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "backtest_results")
+    os.makedirs(out_dir, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    # 交易明细里的 Timestamp 需转成字符串才能 JSON 序列化
+    def _json_default(o):
+        if isinstance(o, (pd.Timestamp, datetime)):
+            return o.isoformat()
+        if isinstance(o, (np.integer,)):
+            return int(o)
+        if isinstance(o, (np.floating,)):
+            return float(o)
+        return str(o)
+
+    payload = {
+        "run_at": datetime.now().isoformat(),
+        "start_date": start_date,
+        "end_date": end_date,
+        "strategy": {"MA_LONG": MA_LONG, "MA_SHORT": MA_SHORT,
+                     "BUY_THRESHOLD": BUY_THRESHOLD, "SELL_THRESHOLD": SELL_THRESHOLD},
+        "overall_return_pct": overall_return,
+        "results": results,
+    }
+    json_path = os.path.join(out_dir, f"backtest_{stamp}.json")
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2, default=_json_default)
+
+    # Markdown 汇总
+    md_lines = [
+        f"# MA120 回测结果 · {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+        "",
+        f"- 回测区间：{start_date} ~ {end_date}",
+        f"- 策略：买入线 MA120×{BUY_THRESHOLD}，卖出线 MA120×{SELL_THRESHOLD}",
+        f"- 组合平均总收益：{overall_return:+.2f}%",
+        "",
+        "| 股票 | 总收益 | 年化(CAGR) | 交易次数 | 胜率 |",
+        "|---|---|---|---|---|",
+    ]
+    for name, r in results.items():
+        md_lines.append(
+            f"| {name} | {r['total_return_pct']:+.2f}% | {r['cagr_pct']:+.2f}% | "
+            f"{r['total_trades']} | {r['win_rate']:.1f}% |"
+        )
+    md_path = os.path.join(out_dir, f"backtest_{stamp}.md")
+    with open(md_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(md_lines) + "\n")
+    # 同时更新一份"最新结果"固定文件，方便查看
+    with open(os.path.join(out_dir, "latest.md"), "w", encoding="utf-8") as f:
+        f.write("\n".join(md_lines) + "\n")
+
+    print(f"\n💾 回测结果已保存：")
+    print(f"   {json_path}")
+    print(f"   {md_path}")
+    print(f"   {os.path.join(out_dir, 'latest.md')}")
+
+
 # ============ 主程序 ============
 if __name__ == "__main__":
 
@@ -254,17 +326,18 @@ if __name__ == "__main__":
     end_date = datetime.now().strftime("%Y%m%d")
     start_date = (datetime.now() - timedelta(days=365*5)).strftime("%Y%m%d")
 
-    # 测试股票池（高股息白马）
-    stocks = [
-        ("600900", "长江电力"),
-        ("601919", "中远海控"),
-        ("600519", "贵州茅台"),
-        ("600036", "招商银行"),
-        ("601288", "农业银行"),
-        ("600028", "中国石化"),
-        ("601398", "工商银行"),
-        ("600887", "伊利股份"),
-    ]
+    # 从 stocks.xlsx 读取持仓 + 关注池（去重，保持顺序）
+    stocks = []
+    seen = set()
+    for it in load_portfolio() + load_watchlist():
+        if it["code"] in seen:
+            continue
+        seen.add(it["code"])
+        stocks.append((it["code"], it["name"]))
+
+    if not stocks:
+        print("⚠️ stocks.xlsx 未读到任何股票，退出")
+        raise SystemExit(1)
 
     print(f"""
 ╔══════════════════════════════════════════════════════╗
@@ -301,9 +374,12 @@ if __name__ == "__main__":
         total_final += r['final_capital']
 
     print(f"{'-'*70}")
-    overall_return = (total_final - total_initial) / total_initial * 100
+    overall_return = (total_final - total_initial) / total_initial * 100 if total_initial else 0.0
     print(f"{'组合平均':<12} {overall_return:>+9.2f}%")
 
     print(f"\n⚠️  注意: 以上为前复权价格回测结果，未扣除交易费用")
     print(f"⚠️  分红再投入逻辑已简化，实际分红时点与股价波动可能不同步")
     print(f"⚠️  历史表现不代表未来收益，策略在震荡市和熊市可能失效")
+
+    # ============ 结果持久化 ============
+    save_results(results, start_date, end_date, overall_return)
