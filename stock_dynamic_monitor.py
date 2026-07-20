@@ -16,15 +16,18 @@ MA120 持仓 & 关注池监控（Sina 数据源）
   python3 stock_dynamic_monitor.py --no-feishu  # 不发飞书
 """
 
-import pandas as pd
-from datetime import datetime
-import warnings
-import time
-import requests
-import os
 import json
+import os
+import subprocess
 import sys
-warnings.filterwarnings('ignore')
+import time
+import warnings
+from datetime import datetime
+
+import pandas as pd
+import requests
+
+warnings.filterwarnings("ignore")
 
 # ============ 策略参数 ============
 MA_LONG = 120
@@ -46,7 +49,6 @@ FEISHU_USER_ID = "ou_2eaab8f758ac6973826b4cf591791afb"
 
 
 # ---------- 数据文件加载 ----------
-# 列名别名：让表头可以用中文或英文
 COLUMN_ALIASES = {
     "code": ["code", "股票代码", "代码"],
     "name": ["name", "股票名称", "名称"],
@@ -56,7 +58,7 @@ COLUMN_ALIASES = {
 
 
 def _normalize_row(row: dict) -> dict:
-    """把中文/英文列名统一成内部键名"""
+    """把中文/英文列名统一成内部键名。"""
     out = {}
     for canonical, aliases in COLUMN_ALIASES.items():
         for alias in aliases:
@@ -68,43 +70,42 @@ def _normalize_row(row: dict) -> dict:
     return out
 
 
-def _safe_float(v) -> float:
-    if v is None or v == "":
+def _safe_float(value) -> float:
+    if value in (None, ""):
         return 0.0
     try:
-        return float(v)
+        return float(value)
     except Exception:
         return 0.0
 
 
-def _safe_code(v) -> str:
-    """Excel 会把纯数字代码读成 int（600015 → 600015），补齐到 6 位"""
-    if v is None:
+def _safe_code(value) -> str:
+    """Excel 可能把纯数字代码读成数值，统一补齐到 6 位。"""
+    if value is None:
         return ""
-    s = str(v).strip()
-    if s.endswith(".0"):
-        s = s[:-2]
-    if s.isdigit() and len(s) < 6:
-        s = s.zfill(6)
-    return s
+    text = str(value).strip()
+    if text.endswith(".0"):
+        text = text[:-2]
+    if text.isdigit() and len(text) < 6:
+        text = text.zfill(6)
+    return text
 
 
 def _read_xlsx_rows(path: str, sheet: str) -> list:
-    """读 xlsx 指定 sheet，返回列表[dict]，跳过空行和代码以 # 开头的注释行"""
+    """读取 xlsx 指定 sheet，跳过空行和 # 注释行。"""
     df = pd.read_excel(path, sheet_name=sheet, dtype=str, engine="openpyxl")
     df.columns = [str(c).strip() for c in df.columns]
     rows = []
-    for _, r in df.iterrows():
-        raw = {k: ("" if pd.isna(v) else str(v).strip()) for k, v in r.items()}
-        # 全空行跳过
+
+    for _, record in df.iterrows():
+        raw = {k: ("" if pd.isna(v) else str(v).strip()) for k, v in record.items()}
         if not any(raw.values()):
             continue
-        norm = _normalize_row(raw)
-        # 代码以 # 开头作为注释行
-        if str(norm.get("code", "")).lstrip().startswith("#"):
+        normalized = _normalize_row(raw)
+        if str(normalized.get("code", "")).lstrip().startswith("#"):
             continue
-        norm["code"] = _safe_code(norm.get("code"))
-        rows.append(norm)
+        normalized["code"] = _safe_code(normalized.get("code"))
+        rows.append(normalized)
     return rows
 
 
@@ -115,18 +116,20 @@ def load_portfolio() -> list:
     try:
         rows = _read_xlsx_rows(STOCKS_FILE, PORTFOLIO_SHEET)
         out = []
-        for it in rows:
-            if not it.get("code") or not it.get("name"):
+        for item in rows:
+            if not item.get("code") or not item.get("name"):
                 continue
-            out.append({
-                "code": it["code"],
-                "name": it["name"],
-                "cost": _safe_float(it.get("cost")),
-                "shares": _safe_float(it.get("shares")),
-            })
+            out.append(
+                {
+                    "code": item["code"],
+                    "name": item["name"],
+                    "cost": _safe_float(item.get("cost")),
+                    "shares": _safe_float(item.get("shares")),
+                }
+            )
         return out
-    except Exception as e:
-        print(f"⚠️ 读取 {os.path.basename(STOCKS_FILE)}[{PORTFOLIO_SHEET}] 失败: {e}")
+    except Exception as exc:
+        print(f"⚠️ 读取 {os.path.basename(STOCKS_FILE)}[{PORTFOLIO_SHEET}] 失败: {exc}")
         return []
 
 
@@ -136,36 +139,36 @@ def load_watchlist() -> list:
     try:
         rows = _read_xlsx_rows(STOCKS_FILE, WATCHLIST_SHEET)
         out = []
-        for it in rows:
-            if not it.get("code") or not it.get("name"):
+        for item in rows:
+            if not item.get("code") or not item.get("name"):
                 continue
-            out.append({"code": it["code"], "name": it["name"]})
+            out.append({"code": item["code"], "name": item["name"]})
         return out
-    except Exception as e:
-        print(f"⚠️ 读取 {os.path.basename(STOCKS_FILE)}[{WATCHLIST_SHEET}] 失败: {e}")
+    except Exception as exc:
+        print(f"⚠️ 读取 {os.path.basename(STOCKS_FILE)}[{WATCHLIST_SHEET}] 失败: {exc}")
         return []
 
 
-# ---------- K线获取 ----------
+# ---------- K 线获取 ----------
 def _cache_path(code: str) -> str:
     os.makedirs(CACHE_DIR, exist_ok=True)
     return os.path.join(CACHE_DIR, f"sina_{code}.json")
 
 
 def _read_cache(code: str) -> pd.DataFrame | None:
-    p = _cache_path(code)
-    if not os.path.exists(p):
+    path = _cache_path(code)
+    if not os.path.exists(path):
         return None
     try:
-        if time.time() - os.path.getmtime(p) > CACHE_DAYS * 86400:
+        if time.time() - os.path.getmtime(path) > CACHE_DAYS * 86400:
             return None
-        with open(p) as f:
+        with open(path, encoding="utf-8") as f:
             cached = json.load(f)
         df = pd.DataFrame(cached["data"])
-        df['date'] = pd.to_datetime(df['date'])
-        df = df.set_index('date').sort_index()
-        for col in ['open', 'high', 'low', 'close', 'volume']:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
+        df["date"] = pd.to_datetime(df["date"])
+        df = df.set_index("date").sort_index()
+        for col in ["open", "high", "low", "close", "volume"]:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
         return df
     except Exception:
         return None
@@ -174,34 +177,35 @@ def _read_cache(code: str) -> pd.DataFrame | None:
 def _write_cache(code: str, df: pd.DataFrame) -> None:
     try:
         os.makedirs(CACHE_DIR, exist_ok=True)
-        data = df.reset_index().to_dict('records')
-        for d in data:
-            d['date'] = d['date'].isoformat()
-        with open(_cache_path(code), "w") as f:
-            json.dump({"data": data}, f)
+        data = df.reset_index().to_dict("records")
+        for item in data:
+            item["date"] = item["date"].isoformat()
+        with open(_cache_path(code), "w", encoding="utf-8") as f:
+            json.dump({"data": data}, f, ensure_ascii=False)
     except Exception:
         pass
 
 
 def get_stock_hist_data(stock_code: str, days: int = DATA_DAYS) -> pd.DataFrame:
-    """Sina K线（前复权）"""
+    """从新浪获取前复权日 K。"""
     cached = _read_cache(stock_code)
     if cached is not None and len(cached) >= MA_LONG:
         return cached
+
     try:
-        symbol = f"sh{stock_code}" if stock_code.startswith('6') else f"sz{stock_code}"
+        symbol = f"sh{stock_code}" if stock_code.startswith("6") else f"sz{stock_code}"
         url = "https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData"
         params = {"symbol": symbol, "scale": 240, "ma": "no", "datalen": days}
-        r = requests.get(url, params=params, timeout=15)
-        data = r.json()
+        response = requests.get(url, params=params, timeout=15)
+        data = response.json()
         if not data:
             return pd.DataFrame()
         df = pd.DataFrame(data)
-        df = df.rename(columns={'day': 'date', 'vol': 'volume'})
-        df['date'] = pd.to_datetime(df['date'])
-        df = df.set_index('date').sort_index()
-        for col in ['open', 'high', 'low', 'close', 'volume']:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
+        df = df.rename(columns={"day": "date", "vol": "volume"})
+        df["date"] = pd.to_datetime(df["date"])
+        df = df.set_index("date").sort_index()
+        for col in ["open", "high", "low", "close", "volume"]:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
         _write_cache(stock_code, df)
         return df
     except Exception:
@@ -212,117 +216,182 @@ def get_stock_hist_data(stock_code: str, days: int = DATA_DAYS) -> pd.DataFrame:
 def check_ma120_signal(df: pd.DataFrame) -> dict | None:
     if len(df) < MA_LONG:
         return None
+
     df = df.copy()
-    df['ma120'] = df['close'].rolling(window=MA_LONG).mean()
+    df["ma120"] = df["close"].rolling(window=MA_LONG).mean()
     latest = df.iloc[-1]
     prev = df.iloc[-2] if len(df) > 1 else latest
 
-    price = latest['close']
-    ma120 = latest['ma120']
+    price = latest["close"]
+    ma120 = latest["ma120"]
     if pd.isna(ma120) or ma120 == 0:
         return None
 
     ma120_pct = (price - ma120) / ma120 * 100
-    prev_price = prev['close']
-    prev_ma120 = prev['ma120'] if not pd.isna(prev['ma120']) else ma120
+    prev_price = prev["close"]
+    prev_ma120 = prev["ma120"] if not pd.isna(prev["ma120"]) else ma120
 
     buy_line = round(ma120 * BUY_THRESHOLD, 2)
     sell_line = round(ma120 * SELL_THRESHOLD, 2)
 
     result = {
-        'price': price, 'ma120': ma120, 'ma120_pct': ma120_pct,
-        'signal': 'hold', 'buy_line': buy_line, 'sell_line': sell_line,
-        'message': '',
+        "price": price,
+        "ma120": ma120,
+        "ma120_pct": ma120_pct,
+        "signal": "hold",
+        "buy_line": buy_line,
+        "sell_line": sell_line,
+        "message": "",
     }
 
     if price < ma120 * BUY_THRESHOLD and prev_price >= prev_ma120 * BUY_THRESHOLD:
-        result['signal'] = 'buy'
-        result['message'] = f"🔥 买入！{price:.2f} < 买入线 {buy_line:.2f}  MA120 {ma120:.2f}  偏离 {ma120_pct:.2f}%"
+        result["signal"] = "buy"
+        result["message"] = (
+            f"🔥 买入：{price:.2f} < 买入线 {buy_line:.2f}  "
+            f"MA120 {ma120:.2f}  偏离 {ma120_pct:.2f}%"
+        )
     elif price > ma120 * SELL_THRESHOLD and prev_price <= prev_ma120 * SELL_THRESHOLD:
-        result['signal'] = 'sell'
-        result['message'] = f"📤 卖出！{price:.2f} > 卖出线 {sell_line:.2f}  MA120 {ma120:.2f}  偏离 {ma120_pct:.2f}%"
+        result["signal"] = "sell"
+        result["message"] = (
+            f"📤 卖出：{price:.2f} > 卖出线 {sell_line:.2f}  "
+            f"MA120 {ma120:.2f}  偏离 {ma120_pct:.2f}%"
+        )
     elif price >= ma120:
-        result['message'] = f"📈 高于 MA120 {ma120:.2f}  +{ma120_pct:.2f}%  卖出线 {sell_line:.2f}"
+        result["message"] = f"📈 高于 MA120 {ma120:.2f}  {ma120_pct:+.2f}%  卖出线 {sell_line:.2f}"
     else:
-        result['message'] = f"📊 低于 MA120 {ma120:.2f}  {ma120_pct:.2f}%  买入线 {buy_line:.2f}"
+        result["message"] = f"📊 低于 MA120 {ma120:.2f}  {ma120_pct:+.2f}%  买入线 {buy_line:.2f}"
     return result
 
 
 def enrich(item: dict) -> dict | None:
-    """取K线 + 算信号，返回 None 表示数据不够"""
+    """补充 K 线和 MA120 信号。"""
     df = get_stock_hist_data(item["code"])
     if df.empty or len(df) < MA_LONG:
         return None
-    sig = check_ma120_signal(df)
-    if not sig:
+    signal = check_ma120_signal(df)
+    if not signal:
         return None
-    return {**item, **sig}
+    return {**item, **signal}
 
 
 # ---------- 飞书发送 ----------
 def send_feishu(text: str) -> bool:
     try:
-        import subprocess
-        args = ["openclaw", "message", "send", "--channel", "feishu",
-                "--target", FEISHU_USER_ID, "--message", text]
+        args = [
+            "openclaw",
+            "message",
+            "send",
+            "--channel",
+            "feishu",
+            "--target",
+            FEISHU_USER_ID,
+            "--message",
+            text,
+        ]
         result = subprocess.run(args, capture_output=True, text=True, timeout=30)
         if result.returncode != 0:
             print(f"     stderr: {result.stderr[:200]}")
         return result.returncode == 0
-    except Exception as e:
-        print(f"     ⚠️ 飞书发送异常: {e}")
+    except Exception as exc:
+        print(f"     ⚠️ 飞书发送异常: {exc}")
         return False
 
 
 # ---------- 文本渲染 ----------
 def _signal_tag(r: dict) -> str:
-    if r['signal'] == 'buy':
+    if r["signal"] == "buy":
         return "🔥 买入"
-    if r['signal'] == 'sell':
+    if r["signal"] == "sell":
         return "📤 卖出"
-    if r['price'] >= r['ma120']:
+    if r["price"] >= r["ma120"]:
         return "📈 高于 MA120"
     return "📊 低于 MA120"
 
 
+def _sort_items(items: list) -> list:
+    def sort_key(r):
+        prio = {"buy": 0, "sell": 0}.get(r["signal"], 1)
+        return (prio, r["ma120_pct"])
+
+    return sorted(items, key=sort_key)
+
+
+def _position_label(r: dict) -> str:
+    if r["signal"] == "buy":
+        return "买入信号"
+    if r["signal"] == "sell":
+        return "卖出信号"
+    return "高于MA120" if r["ma120_pct"] >= 0 else "低于MA120"
+
+
+def _print_console_table(title: str, items: list) -> None:
+    print(f"\n{title} {len(items)} 支")
+    if not items:
+        print("  无数据")
+        return
+
+    headers = ["股票", "代码", "现价", "MA120", "偏离", "买入线", "卖出线", "状态"]
+    rows = []
+    for item in _sort_items(items):
+        rows.append(
+            [
+                item["name"],
+                item["code"],
+                f"{item['price']:.2f}",
+                f"{item['ma120']:.2f}",
+                f"{item['ma120_pct']:+.2f}%",
+                f"{item['buy_line']:.2f}",
+                f"{item['sell_line']:.2f}",
+                _position_label(item),
+            ]
+        )
+
+    widths = [max(len(headers[i]), max(len(row[i]) for row in rows)) for i in range(len(headers))]
+
+    def fmt(row):
+        return "| " + " | ".join(str(cell).ljust(widths[i]) for i, cell in enumerate(row)) + " |"
+
+    print(fmt(headers))
+    print("|-" + "-|-".join("-" * width for width in widths) + "-|")
+    for row in rows:
+        print(fmt(row))
+
+
 def render_portfolio_text(items: list, today: str) -> str:
-    """持仓报告：优先出信号股票，再按 MA120 偏离排序"""
+    """持仓报告：优先展示信号股票，再按偏离排序。"""
     if not items:
         return f"📦 持仓监控 · {today}\n\n无数据"
 
-    # 按信号优先级排序： buy/sell > 偏离绝对值
-    def sort_key(r):
-        prio = {'buy': 0, 'sell': 0}.get(r['signal'], 1)
-        return (prio, -abs(r['ma120_pct']))
-    items = sorted(items, key=sort_key)
-
+    items = _sort_items(items)
     lines = [f"📦 持仓监控 · {today}", ""]
     total_cost = total_value = 0.0
-    signal_count = {'buy': 0, 'sell': 0}
+    signal_count = {"buy": 0, "sell": 0}
 
-    for r in items:
-        tag = _signal_tag(r)
-        if r['signal'] in signal_count:
-            signal_count[r['signal']] += 1
-        line = f"{tag}  {r['name']} ({r['code']})  现价 {r['price']:.2f}  MA120 {r['ma120']:.2f}  偏离 {r['ma120_pct']:+.2f}%"
-        if r.get('cost') and r.get('shares'):
-            pnl_pct = (r['price'] - r['cost']) / r['cost'] * 100
-            value = r['price'] * r['shares']
-            cost_amt = r['cost'] * r['shares']
+    for item in items:
+        tag = _signal_tag(item)
+        if item["signal"] in signal_count:
+            signal_count[item["signal"]] += 1
+        line = (
+            f"{tag}  {item['name']} ({item['code']})  现价 {item['price']:.2f}  "
+            f"MA120 {item['ma120']:.2f}  偏离 {item['ma120_pct']:+.2f}%"
+        )
+        if item.get("cost") and item.get("shares"):
+            pnl_pct = (item["price"] - item["cost"]) / item["cost"] * 100
+            value = item["price"] * item["shares"]
+            cost_amt = item["cost"] * item["shares"]
             total_cost += cost_amt
             total_value += value
-            line += f"  |  成本 {r['cost']:.2f}  浮盈 {pnl_pct:+.2f}%"
-        if r['signal'] == 'buy':
-            line += f"  → 买入线 {r['buy_line']:.2f}"
-        elif r['signal'] == 'sell':
-            line += f"  → 卖出线 {r['sell_line']:.2f}"
+            line += f"  |  成本 {item['cost']:.2f}  浮盈 {pnl_pct:+.2f}%"
+        if item["signal"] == "buy":
+            line += f"  → 买入线 {item['buy_line']:.2f}"
+        elif item["signal"] == "sell":
+            line += f"  → 卖出线 {item['sell_line']:.2f}"
         else:
-            line += f"  → 买 {r['buy_line']:.2f} / 卖 {r['sell_line']:.2f}"
+            line += f"  → 买 {item['buy_line']:.2f} / 卖 {item['sell_line']:.2f}"
         lines.append(line)
 
-    # 汇总
     summary = []
-    if signal_count['buy'] or signal_count['sell']:
+    if signal_count["buy"] or signal_count["sell"]:
         summary.append(f"今日信号：🔥买入 {signal_count['buy']} · 📤卖出 {signal_count['sell']}")
     if total_cost > 0:
         pnl = total_value - total_cost
@@ -338,26 +407,25 @@ def render_watchlist_text(items: list, today: str) -> str:
     if not items:
         return f"👀 关注池 · {today}\n\n无数据"
 
-    def sort_key(r):
-        prio = {'buy': 0, 'sell': 0}.get(r['signal'], 1)
-        return (prio, -abs(r['ma120_pct']))
-    items = sorted(items, key=sort_key)
-
+    items = _sort_items(items)
     lines = [f"👀 关注池 · {today}", ""]
-    signal_count = {'buy': 0, 'sell': 0}
-    for r in items:
-        tag = _signal_tag(r)
-        if r['signal'] in signal_count:
-            signal_count[r['signal']] += 1
-        line = f"{tag}  {r['name']} ({r['code']})  现价 {r['price']:.2f}  MA120 {r['ma120']:.2f}  偏离 {r['ma120_pct']:+.2f}%"
-        if r['signal'] == 'buy':
-            line += f"  → 买入线 {r['buy_line']:.2f}"
-        elif r['signal'] == 'sell':
-            line += f"  → 卖出线 {r['sell_line']:.2f}"
+    signal_count = {"buy": 0, "sell": 0}
+    for item in items:
+        tag = _signal_tag(item)
+        if item["signal"] in signal_count:
+            signal_count[item["signal"]] += 1
+        line = (
+            f"{tag}  {item['name']} ({item['code']})  现价 {item['price']:.2f}  "
+            f"MA120 {item['ma120']:.2f}  偏离 {item['ma120_pct']:+.2f}%"
+        )
+        if item["signal"] == "buy":
+            line += f"  → 买入线 {item['buy_line']:.2f}"
+        elif item["signal"] == "sell":
+            line += f"  → 卖出线 {item['sell_line']:.2f}"
         else:
-            line += f"  → 买 {r['buy_line']:.2f} / 卖 {r['sell_line']:.2f}"
+            line += f"  → 买 {item['buy_line']:.2f} / 卖 {item['sell_line']:.2f}"
         lines.append(line)
-    if signal_count['buy'] or signal_count['sell']:
+    if signal_count["buy"] or signal_count["sell"]:
         lines.append("")
         lines.append(f"今日信号：🔥买入 {signal_count['buy']} · 📤卖出 {signal_count['sell']}")
     return "\n".join(lines)
@@ -366,42 +434,44 @@ def render_watchlist_text(items: list, today: str) -> str:
 # ---------- 主流程 ----------
 def run(mode: str = "all", feishu: bool = True):
     today = datetime.now().strftime("%Y-%m-%d")
-    print(f"\n{'='*60}\n📊 MA120 监控 · {today}  mode={mode}\n{'='*60}")
+    print(f"\n{'=' * 60}\n📊 MA120 监控 · {today}  mode={mode}\n{'=' * 60}")
 
     portfolio_items = []
     watchlist_items = []
+    portfolio_skipped = []
+    watchlist_skipped = []
 
     if mode in ("all", "portfolio"):
         portfolio = load_portfolio()
-        print(f"\n📦 持仓 {len(portfolio)} 支")
-        for it in portfolio:
-            r = enrich(it)
-            if r is None:
-                print(f"  ⚠️ {it['name']} ({it['code']}): 数据不足")
+        for item in portfolio:
+            enriched = enrich(item)
+            if enriched is None:
+                portfolio_skipped.append(item)
                 continue
-            portfolio_items.append(r)
-            print(f"  {r['message']} [{r['name']}]")
+            portfolio_items.append(enriched)
             time.sleep(0.2)
+        _print_console_table("📦 持仓", portfolio_items)
+        for item in portfolio_skipped:
+            print(f"  ⚠️ 数据不足: {item['name']} ({item['code']})")
 
     if mode in ("all", "watchlist"):
         watchlist = load_watchlist()
-        # 去重：跳过已在持仓里的
         if mode == "all":
-            portfolio_codes = {x["code"] for x in portfolio_items}
-            watchlist = [w for w in watchlist if w["code"] not in portfolio_codes]
-        print(f"\n👀 关注池 {len(watchlist)} 支")
-        for it in watchlist:
-            r = enrich(it)
-            if r is None:
-                print(f"  ⚠️ {it['name']} ({it['code']}): 数据不足")
+            portfolio_codes = {item["code"] for item in portfolio_items}
+            watchlist = [item for item in watchlist if item["code"] not in portfolio_codes]
+        for item in watchlist:
+            enriched = enrich(item)
+            if enriched is None:
+                watchlist_skipped.append(item)
                 continue
-            watchlist_items.append(r)
-            print(f"  {r['message']} [{r['name']}]")
+            watchlist_items.append(enriched)
             time.sleep(0.2)
+        _print_console_table("👀 关注池", watchlist_items)
+        for item in watchlist_skipped:
+            print(f"  ⚠️ 数据不足: {item['name']} ({item['code']})")
 
-    # 发飞书
     if feishu and (portfolio_items or watchlist_items):
-        print(f"\n📤 发送飞书...")
+        print("\n📨 发送飞书...")
         if portfolio_items:
             ok = send_feishu(render_portfolio_text(portfolio_items, today))
             print(f"  持仓: {'✅' if ok else '⚠️ 失败'}")
@@ -409,7 +479,7 @@ def run(mode: str = "all", feishu: bool = True):
             ok = send_feishu(render_watchlist_text(watchlist_items, today))
             print(f"  关注池: {'✅' if ok else '⚠️ 失败'}")
 
-    print(f"\n{'='*60}\n✅ 完成\n{'='*60}\n")
+    print(f"\n{'=' * 60}\n✅ 完成\n{'=' * 60}\n")
     return {"portfolio": portfolio_items, "watchlist": watchlist_items}
 
 
