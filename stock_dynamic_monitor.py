@@ -18,7 +18,6 @@ MA120 持仓 & 关注池监控（Sina 数据源）
 
 import json
 import os
-import subprocess
 import sys
 import time
 import warnings
@@ -45,7 +44,9 @@ PORTFOLIO_SHEET = "portfolio"
 WATCHLIST_SHEET = "watchlist"
 
 # ============ 飞书 ============
-FEISHU_USER_ID = "ou_2eaab8f758ac6973826b4cf591791afb"
+FEISHU_WEBHOOK_URL_ENV = "FEISHU_WEBHOOK_URL"
+FEISHU_WEBHOOK_URL_TEMPLATE = "{{FEISHU_WEBHOOK_URL}}"
+LOCAL_ENV_FILE = os.path.join(BASE_DIR, ".env.local")
 
 
 # ---------- 数据文件加载 ----------
@@ -275,23 +276,73 @@ def enrich(item: dict) -> dict | None:
 
 
 # ---------- 飞书发送 ----------
-def send_feishu(text: str) -> bool:
+def _read_local_env_value(key: str) -> str:
+    """Read a KEY=value pair from .env.local without adding a dotenv dependency."""
+    if not os.path.exists(LOCAL_ENV_FILE):
+        return ""
+
     try:
-        args = [
-            "openclaw",
-            "message",
-            "send",
-            "--channel",
-            "feishu",
-            "--target",
-            FEISHU_USER_ID,
-            "--message",
-            text,
-        ]
-        result = subprocess.run(args, capture_output=True, text=True, timeout=30)
-        if result.returncode != 0:
-            print(f"     stderr: {result.stderr[:200]}")
-        return result.returncode == 0
+        with open(LOCAL_ENV_FILE, encoding="utf-8-sig") as f:
+            for raw_line in f:
+                line = raw_line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                name, value = line.split("=", 1)
+                if name.strip() != key:
+                    continue
+                return value.strip().strip('"').strip("'")
+    except Exception as exc:
+        print(f"     ⚠️ 读取 .env.local 失败: {exc}")
+    return ""
+
+
+def _get_feishu_webhook_url() -> str:
+    webhook_url = os.environ.get(FEISHU_WEBHOOK_URL_ENV, "").strip()
+    if webhook_url:
+        return webhook_url
+
+    webhook_url = _read_local_env_value(FEISHU_WEBHOOK_URL_ENV)
+    if webhook_url:
+        return webhook_url
+
+    template = FEISHU_WEBHOOK_URL_TEMPLATE.strip()
+    if template and template not in {"{{FEISHU_WEBHOOK_URL}}", "${FEISHU_WEBHOOK_URL}"}:
+        return template
+    return ""
+
+
+def _feishu_payload(message) -> dict:
+    if isinstance(message, dict):
+        return message
+    return {"msg_type": "text", "content": {"text": str(message)}}
+
+
+def send_feishu(message) -> bool:
+    webhook_url = _get_feishu_webhook_url()
+    if not webhook_url:
+        print(f"     ⚠️ 未配置 {FEISHU_WEBHOOK_URL_ENV}，跳过飞书推送")
+        return False
+
+    try:
+        response = requests.post(
+            webhook_url,
+            json=_feishu_payload(message),
+            timeout=15,
+        )
+        if response.status_code != 200:
+            print(f"     HTTP {response.status_code}: {response.text[:200]}")
+            return False
+
+        try:
+            data = response.json()
+        except ValueError:
+            return True
+
+        code = data.get("code", data.get("StatusCode", 0))
+        if code not in (0, "0"):
+            print(f"     飞书返回异常: {str(data)[:200]}")
+            return False
+        return True
     except Exception as exc:
         print(f"     ⚠️ 飞书发送异常: {exc}")
         return False
@@ -431,6 +482,112 @@ def render_watchlist_text(items: list, today: str) -> str:
     return "\n".join(lines)
 
 
+def _card_header_template(items: list) -> str:
+    if any(item["signal"] == "sell" or item["price"] > item["sell_line"] for item in items):
+        return "red"
+    if any(item["signal"] == "buy" or item["price"] < item["buy_line"] for item in items):
+        return "green"
+    return "blue"
+
+
+def _card_status(item: dict) -> str:
+    if item["signal"] == "buy":
+        return "[买入信号]"
+    if item["signal"] == "sell":
+        return "[卖出信号]"
+    if item["price"] < item["buy_line"]:
+        return "[低于买入线]"
+    if item["price"] > item["sell_line"]:
+        return "[高于卖出线]"
+    return f"[{_position_label(item)}]"
+
+
+def _card_stock_line(item: dict, include_portfolio: bool = False) -> str:
+    line = (
+        f"**{item['name']} ({item['code']})**  { _card_status(item) }\n"
+        f"现价 {item['price']:.2f} | MA120 {item['ma120']:.2f} | 偏离 {item['ma120_pct']:+.2f}%\n"
+        f"买入线 {item['buy_line']:.2f} | 卖出线 {item['sell_line']:.2f}"
+    )
+    if include_portfolio and item.get("cost") and item.get("shares"):
+        pnl_pct = (item["price"] - item["cost"]) / item["cost"] * 100
+        line += f" | 成本 {item['cost']:.2f} | 浮盈 {pnl_pct:+.2f}%"
+    return line
+
+
+def _signal_summary(items: list) -> str:
+    buy_count = sum(1 for item in items if item["signal"] == "buy")
+    sell_count = sum(1 for item in items if item["signal"] == "sell")
+    buy_zone_count = sum(1 for item in items if item["price"] < item["buy_line"])
+    sell_zone_count = sum(1 for item in items if item["price"] > item["sell_line"])
+    return (
+        f"今日信号：买入 {buy_count} / 卖出 {sell_count}\n"
+        f"区间状态：低于买入线 {buy_zone_count} / 高于卖出线 {sell_zone_count}"
+    )
+
+
+def _portfolio_summary(items: list) -> str:
+    total_cost = 0.0
+    total_value = 0.0
+    for item in items:
+        if item.get("cost") and item.get("shares"):
+            total_cost += item["cost"] * item["shares"]
+            total_value += item["price"] * item["shares"]
+    if total_cost <= 0:
+        return _signal_summary(items)
+
+    pnl = total_value - total_cost
+    pnl_pct = pnl / total_cost * 100
+    return (
+        f"{_signal_summary(items)}\n"
+        f"持仓市值 ¥{total_value:,.0f} | 浮盈 ¥{pnl:+,.0f} ({pnl_pct:+.2f}%)"
+    )
+
+
+def _render_card(title: str, items: list, today: str, summary: str, include_portfolio: bool = False) -> dict:
+    sorted_items = _sort_items(items)
+    stock_lines = [
+        _card_stock_line(item, include_portfolio=include_portfolio)
+        for item in sorted_items
+    ]
+    content = "\n\n".join(stock_lines) if stock_lines else "无数据"
+
+    return {
+        "msg_type": "interactive",
+        "card": {
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "template": _card_header_template(items),
+                "title": {"tag": "plain_text", "content": f"{title} · {today}"},
+            },
+            "elements": [
+                {"tag": "markdown", "content": summary},
+                {"tag": "hr"},
+                {"tag": "markdown", "content": content},
+            ],
+        },
+    }
+
+
+def render_portfolio_card(items: list, today: str) -> dict:
+    return _render_card(
+        "持仓监控",
+        items,
+        today,
+        _portfolio_summary(items),
+        include_portfolio=True,
+    )
+
+
+def render_watchlist_card(items: list, today: str) -> dict:
+    return _render_card(
+        "关注池",
+        items,
+        today,
+        _signal_summary(items),
+        include_portfolio=False,
+    )
+
+
 # ---------- 主流程 ----------
 def run(mode: str = "all", feishu: bool = True):
     today = datetime.now().strftime("%Y-%m-%d")
@@ -473,10 +630,10 @@ def run(mode: str = "all", feishu: bool = True):
     if feishu and (portfolio_items or watchlist_items):
         print("\n📨 发送飞书...")
         if portfolio_items:
-            ok = send_feishu(render_portfolio_text(portfolio_items, today))
+            ok = send_feishu(render_portfolio_card(portfolio_items, today))
             print(f"  持仓: {'✅' if ok else '⚠️ 失败'}")
         if watchlist_items:
-            ok = send_feishu(render_watchlist_text(watchlist_items, today))
+            ok = send_feishu(render_watchlist_card(watchlist_items, today))
             print(f"  关注池: {'✅' if ok else '⚠️ 失败'}")
 
     print(f"\n{'=' * 60}\n✅ 完成\n{'=' * 60}\n")
