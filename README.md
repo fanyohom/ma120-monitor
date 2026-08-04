@@ -23,18 +23,54 @@ ma120-monitor/
 
 ## 用法
 
-```bash
-# 持仓 + 关注池（默认会推飞书）
-~/.openclaw/workspace/.venv/bin/python stock_dynamic_monitor.py
+### 首次配置
 
-# 只看持仓
-python3 stock_dynamic_monitor.py --portfolio
+项目提供了 `.env.example` 模板。先复制一份为 `.env.local`：
 
-# 只看关注池
-python3 stock_dynamic_monitor.py --watchlist
+```powershell
+Copy-Item .env.example .env.local
+```
+
+然后编辑 `.env.local`，把占位 token 替换成飞书群机器人 webhook：
+
+```env
+FEISHU_WEBHOOK_URL=https://open.feishu.cn/open-apis/bot/v2/hook/你的-webhook-token
+```
+
+`.env.local` 已被 `.gitignore` 忽略，不要提交真实 webhook。
+
+### Windows PowerShell
+
+```powershell
+cd D:\Project\github\ma120-monitor
+$env:PYTHONUTF8='1'
+$env:UV_CACHE_DIR='D:\Project\github\ma120-monitor\.uv-cache'
+
+# 持仓 + 关注池（默认推送飞书卡片）
+uv run --with pandas --with openpyxl --with requests python stock_dynamic_monitor.py
 
 # 只看终端，不发飞书
-python3 stock_dynamic_monitor.py --no-feishu
+uv run --with pandas --with openpyxl --with requests python stock_dynamic_monitor.py --no-feishu
+
+# 只看持仓
+uv run --with pandas --with openpyxl --with requests python stock_dynamic_monitor.py --portfolio --no-feishu
+
+# 只看关注池
+uv run --with pandas --with openpyxl --with requests python stock_dynamic_monitor.py --watchlist --no-feishu
+```
+
+### macOS / Linux
+
+```bash
+cd /path/to/ma120-monitor
+export PYTHONUTF8=1
+export UV_CACHE_DIR="$PWD/.uv-cache"
+
+# 持仓 + 关注池（默认推送飞书卡片）
+uv run --with pandas --with openpyxl --with requests python stock_dynamic_monitor.py
+
+# 只看终端，不发飞书
+uv run --with pandas --with openpyxl --with requests python stock_dynamic_monitor.py --no-feishu
 ```
 
 ## 配置
@@ -60,9 +96,13 @@ python3 stock_dynamic_monitor.py --no-feishu
 
 表头支持中文（`股票代码/股票名称/成本价/持仓数量`）或英文（`code/name/cost/shares`）。
 
-**依赖：** 需要 `openpyxl`（项目 venv 里已装）。
+**依赖：** 脚本通过 `uv run --with ...` 自动准备 `pandas/openpyxl/requests`。
 
-**飞书推送** — 脚本顶部 `FEISHU_USER_ID` 指定接收人，发送通过 OpenClaw 的 `openclaw message send` CLI。
+**飞书推送配置优先级：**
+
+1. 环境变量 `FEISHU_WEBHOOK_URL`
+2. 项目根目录 `.env.local` 中的 `FEISHU_WEBHOOK_URL`
+3. 都没配置时，脚本会跳过飞书推送并在终端提示
 
 ## 定时调度
 
