@@ -81,15 +81,30 @@ def _safe_float(value) -> float:
 
 
 def _safe_code(value) -> str:
-    """Excel 可能把纯数字代码读成数值，统一补齐到 6 位。"""
+    """Excel 可能把纯数字代码读成数值；港股使用 HKxxxxx 格式。"""
     if value is None:
         return ""
-    text = str(value).strip()
+    text = str(value).strip().upper()
     if text.endswith(".0"):
         text = text[:-2]
+    if text.startswith("HK"):
+        digits = text[2:]
+        return f"HK{digits.zfill(5)}" if digits.isdigit() else text
     if text.isdigit() and len(text) < 6:
         text = text.zfill(6)
     return text
+
+
+def _is_hk_code(stock_code: str) -> bool:
+    return stock_code.upper().startswith("HK")
+
+
+def _sina_symbol(stock_code: str) -> str:
+    return f"sh{stock_code}" if stock_code.startswith("6") else f"sz{stock_code}"
+
+
+def _tencent_symbol(stock_code: str) -> str:
+    return f"hk{stock_code[2:]}"
 
 
 def _read_xlsx_rows(path: str, sheet: str) -> list:
@@ -156,12 +171,19 @@ def _cache_path(code: str) -> str:
     return os.path.join(CACHE_DIR, f"sina_{code}.json")
 
 
+def _is_cache_fresh(path: str) -> bool:
+    modified_at = datetime.fromtimestamp(os.path.getmtime(path))
+    if modified_at.date() != datetime.now().date():
+        return False
+    return time.time() - os.path.getmtime(path) <= CACHE_DAYS * 86400
+
+
 def _read_cache(code: str) -> pd.DataFrame | None:
     path = _cache_path(code)
     if not os.path.exists(path):
         return None
     try:
-        if time.time() - os.path.getmtime(path) > CACHE_DAYS * 86400:
+        if not _is_cache_fresh(path):
             return None
         with open(path, encoding="utf-8") as f:
             cached = json.load(f)
@@ -188,13 +210,36 @@ def _write_cache(code: str, df: pd.DataFrame) -> None:
 
 
 def get_stock_hist_data(stock_code: str, days: int = DATA_DAYS) -> pd.DataFrame:
-    """从新浪获取前复权日 K。"""
+    """获取前复权日 K：A 股使用新浪，港股使用腾讯。"""
     cached = _read_cache(stock_code)
     if cached is not None and len(cached) >= MA_LONG:
         return cached
 
     try:
-        symbol = f"sh{stock_code}" if stock_code.startswith("6") else f"sz{stock_code}"
+        if _is_hk_code(stock_code):
+            symbol = _tencent_symbol(stock_code)
+            url = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
+            params = {"param": f"{symbol},day,,,{days},qfq"}
+            response = requests.get(url, params=params, timeout=15)
+            response.raise_for_status()
+            payload = response.json()
+            market_data = payload.get("data", {}).get(symbol, {})
+            data = market_data.get("qfqday") or market_data.get("day") or []
+            if not data:
+                return pd.DataFrame()
+
+            df = pd.DataFrame(
+                [row[:6] for row in data],
+                columns=["date", "open", "close", "high", "low", "volume"],
+            )
+            df["date"] = pd.to_datetime(df["date"])
+            df = df.set_index("date").sort_index()
+            for col in ["open", "high", "low", "close", "volume"]:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+            _write_cache(stock_code, df)
+            return df
+
+        symbol = _sina_symbol(stock_code)
         url = "https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData"
         params = {"symbol": symbol, "scale": 240, "ma": "no", "datalen": days}
         response = requests.get(url, params=params, timeout=15)
@@ -214,7 +259,67 @@ def get_stock_hist_data(stock_code: str, days: int = DATA_DAYS) -> pd.DataFrame:
 
 
 # ---------- MA120 信号 ----------
-def check_ma120_signal(df: pd.DataFrame) -> dict | None:
+def get_stock_realtime_quote(stock_code: str) -> dict:
+    """获取实时行情；失败时返回空字典，由调用方回退至日线收盘价。"""
+    try:
+        if _is_hk_code(stock_code):
+            symbol = _tencent_symbol(stock_code)
+            response = requests.get(f"https://qt.gtimg.cn/q={symbol}", timeout=10)
+            response.raise_for_status()
+            response.encoding = "gbk"
+            text = response.text.strip()
+            if '="' not in text:
+                return {}
+
+            raw = text.split('="', 1)[1].rsplit('";', 1)[0]
+            fields = raw.split("~")
+            if len(fields) < 31 or not fields[1]:
+                return {}
+
+            price = _safe_float(fields[3])
+            if price <= 0:
+                return {}
+
+            quote_at = fields[30].split()
+            return {
+                "price": price,
+                "quote_date": quote_at[0].replace("/", "-") if quote_at else "",
+                "quote_time": quote_at[1] if len(quote_at) > 1 else "",
+                "price_source": "realtime",
+            }
+
+        symbol = _sina_symbol(stock_code)
+        url = f"https://hq.sinajs.cn/list={symbol}"
+        response = requests.get(
+            url,
+            headers={"Referer": "https://finance.sina.com.cn"},
+            timeout=10,
+        )
+        response.encoding = response.apparent_encoding or "gbk"
+        text = response.text.strip()
+        if '="' not in text:
+            return {}
+
+        raw = text.split('="', 1)[1].rsplit('";', 1)[0]
+        fields = raw.split(",")
+        if len(fields) < 32 or not fields[0]:
+            return {}
+
+        price = _safe_float(fields[3])
+        if price <= 0:
+            return {}
+
+        return {
+            "price": price,
+            "quote_date": fields[30],
+            "quote_time": fields[31],
+            "price_source": "realtime",
+        }
+    except Exception:
+        return {}
+
+
+def check_ma120_signal(df: pd.DataFrame, current_price: float | None = None) -> dict | None:
     if len(df) < MA_LONG:
         return None
 
@@ -223,7 +328,7 @@ def check_ma120_signal(df: pd.DataFrame) -> dict | None:
     latest = df.iloc[-1]
     prev = df.iloc[-2] if len(df) > 1 else latest
 
-    price = latest["close"]
+    price = current_price if current_price and current_price > 0 else latest["close"]
     ma120 = latest["ma120"]
     if pd.isna(ma120) or ma120 == 0:
         return None
@@ -269,10 +374,11 @@ def enrich(item: dict) -> dict | None:
     df = get_stock_hist_data(item["code"])
     if df.empty or len(df) < MA_LONG:
         return None
-    signal = check_ma120_signal(df)
+    quote = get_stock_realtime_quote(item["code"])
+    signal = check_ma120_signal(df, current_price=quote.get("price"))
     if not signal:
         return None
-    return {**item, **signal}
+    return {**item, **signal, **quote}
 
 
 # ---------- 飞书发送 ----------
@@ -361,8 +467,9 @@ def _signal_tag(r: dict) -> str:
 
 def _sort_items(items: list) -> list:
     def sort_key(r):
-        prio = {"buy": 0, "sell": 0}.get(r["signal"], 1)
-        return (prio, r["ma120_pct"])
+        prio = _card_status_priority(r)
+        pct_sort = -r["ma120_pct"] if prio in (0, 3) else r["ma120_pct"]
+        return (prio, pct_sort, r["code"])
 
     return sorted(items, key=sort_key)
 
@@ -491,27 +598,90 @@ def _card_header_template(items: list) -> str:
 
 
 def _card_status(item: dict) -> str:
-    if item["signal"] == "buy":
-        return "[买入信号]"
     if item["signal"] == "sell":
-        return "[卖出信号]"
-    if item["price"] < item["buy_line"]:
-        return "[低于买入线]"
+        return "卖出信号"
     if item["price"] > item["sell_line"]:
-        return "[高于卖出线]"
-    return f"[{_position_label(item)}]"
+        return "高于卖出线"
+    if item["signal"] == "buy":
+        return "买入信号"
+    if item["price"] < item["buy_line"]:
+        return "低于买入线"
+    return "高于MA120" if item["price"] >= item["ma120"] else "低于MA120"
 
 
-def _card_stock_line(item: dict, include_portfolio: bool = False) -> str:
-    line = (
-        f"**{item['name']} ({item['code']})**  { _card_status(item) }\n"
-        f"现价 {item['price']:.2f} | MA120 {item['ma120']:.2f} | 偏离 {item['ma120_pct']:+.2f}%\n"
-        f"买入线 {item['buy_line']:.2f} | 卖出线 {item['sell_line']:.2f}"
-    )
-    if include_portfolio and item.get("cost") and item.get("shares"):
-        pnl_pct = (item["price"] - item["cost"]) / item["cost"] * 100
-        line += f" | 成本 {item['cost']:.2f} | 浮盈 {pnl_pct:+.2f}%"
-    return line
+def _card_status_priority(item: dict) -> int:
+    if item["signal"] == "sell" or item["price"] > item["sell_line"]:
+        return 0
+    if item["signal"] == "buy" or item["price"] < item["buy_line"]:
+        return 1
+    if item["price"] < item["ma120"]:
+        return 2
+    return 3
+
+
+def _escape_table_cell(value) -> str:
+    return str(value).replace("|", "\\|").replace("\n", " ")
+
+
+def _card_table_row(item: dict, include_portfolio: bool = False) -> dict:
+    row = {
+        "status": _card_status(item),
+        "stock": f"{_escape_table_cell(item['name'])} {item['code']}",
+        "price": f"{item['price']:.2f}",
+        "ma120": f"{item['ma120']:.2f}",
+        "diff": f"{item['ma120_pct']:+.2f}%",
+        "buy_line": f"{item['buy_line']:.2f}",
+        "sell_line": f"{item['sell_line']:.2f}",
+    }
+    if include_portfolio:
+        if item.get("cost") and item.get("shares"):
+            pnl_pct = (item["price"] - item["cost"]) / item["cost"] * 100
+            row.update({"cost": f"{item['cost']:.2f}", "pnl": f"{pnl_pct:+.2f}%"})
+        else:
+            row.update({"cost": "-", "pnl": "-"})
+    return row
+
+
+def _card_table_columns(include_portfolio: bool = False) -> list:
+    columns = [
+        ("status", "状态"),
+        ("stock", "股票"),
+        ("price", "现价"),
+        ("ma120", "MA120"),
+        ("diff", "偏离"),
+        ("buy_line", "买入线"),
+        ("sell_line", "卖出线"),
+    ]
+    if include_portfolio:
+        columns.extend([("cost", "成本"), ("pnl", "浮盈")])
+
+    return [
+        {
+            "name": name,
+            "display_name": display_name,
+            "data_type": "text",
+            "horizontal_align": "left",
+            "width": "auto",
+        }
+        for name, display_name in columns
+    ]
+
+
+def _card_table_component(items: list, include_portfolio: bool = False) -> dict:
+    return {
+        "tag": "table",
+        "page_size": min(max(len(items), 1), 10),
+        "row_height": "low",
+        "header_style": {
+            "background_style": "grey",
+            "bold": True,
+        },
+        "columns": _card_table_columns(include_portfolio=include_portfolio),
+        "rows": [
+            _card_table_row(item, include_portfolio=include_portfolio)
+            for item in _sort_items(items)
+        ],
+    }
 
 
 def _signal_summary(items: list) -> str:
@@ -523,6 +693,48 @@ def _signal_summary(items: list) -> str:
         f"今日信号：买入 {buy_count} / 卖出 {sell_count}\n"
         f"区间状态：低于买入线 {buy_zone_count} / 高于卖出线 {sell_zone_count}"
     )
+
+
+def _triggered_signal_summary(items: list) -> str:
+    alert_items = [
+        item
+        for item in _sort_items(items)
+        if item["signal"] in {"buy", "sell"}
+        or item["price"] < item["buy_line"]
+        or item["price"] > item["sell_line"]
+    ]
+    if not alert_items:
+        return ""
+
+    lines = ["**重点提醒**"]
+    for item in alert_items:
+        if item["signal"] == "sell":
+            label = "卖出信号"
+            comparator = ">"
+            line_name = "卖出线"
+            line_value = item["sell_line"]
+        elif item["price"] > item["sell_line"]:
+            label = "高于卖出线"
+            comparator = ">"
+            line_name = "卖出线"
+            line_value = item["sell_line"]
+        elif item["signal"] == "buy":
+            label = "买入信号"
+            comparator = "<"
+            line_name = "买入线"
+            line_value = item["buy_line"]
+        else:
+            label = "低于买入线"
+            comparator = "<"
+            line_name = "买入线"
+            line_value = item["buy_line"]
+
+        lines.append(
+            f"{label}：{item['name']} {item['code']} | "
+            f"现价 {item['price']:.2f} {comparator} {line_name} {line_value:.2f} | "
+            f"MA120 {item['ma120']:.2f} | 偏离 {item['ma120_pct']:+.2f}%"
+        )
+    return "\n".join(lines)
 
 
 def _portfolio_summary(items: list) -> str:
@@ -544,12 +756,26 @@ def _portfolio_summary(items: list) -> str:
 
 
 def _render_card(title: str, items: list, today: str, summary: str, include_portfolio: bool = False) -> dict:
-    sorted_items = _sort_items(items)
-    stock_lines = [
-        _card_stock_line(item, include_portfolio=include_portfolio)
-        for item in sorted_items
-    ]
-    content = "\n\n".join(stock_lines) if stock_lines else "无数据"
+    detail_element = (
+        _card_table_component(items, include_portfolio=include_portfolio)
+        if items
+        else {"tag": "markdown", "content": "无数据"}
+    )
+    elements = [{"tag": "markdown", "content": summary}]
+    signal_summary = _triggered_signal_summary(items)
+    if signal_summary:
+        elements.extend(
+            [
+                {"tag": "hr"},
+                {"tag": "markdown", "content": signal_summary},
+            ]
+        )
+    elements.extend(
+        [
+            {"tag": "hr"},
+            detail_element,
+        ]
+    )
 
     return {
         "msg_type": "interactive",
@@ -559,11 +785,7 @@ def _render_card(title: str, items: list, today: str, summary: str, include_port
                 "template": _card_header_template(items),
                 "title": {"tag": "plain_text", "content": f"{title} · {today}"},
             },
-            "elements": [
-                {"tag": "markdown", "content": summary},
-                {"tag": "hr"},
-                {"tag": "markdown", "content": content},
-            ],
+            "elements": elements,
         },
     }
 
