@@ -10,6 +10,12 @@ venv/
 .DS_Store
 .vscode/
 .idea/
+~$*
+
+# Local AI assistant settings
+.claude/
+.codex/
+CLAUDE.local.md
 
 # Local secrets (if any)
 .env
@@ -19,5 +25,6 @@ venv/
 *.log
 
 # 本地产物（可随时重新生成，不纳入版本管理）
+.uv-cache/
 .stock_cache/
 backtest_results/

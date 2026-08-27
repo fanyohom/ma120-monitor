@@ -1,0 +1,21 @@
+[project]
+name = "ma120-monitor"
+version = "0.1.0"
+description = "MA120 stock portfolio and watchlist monitor"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "openpyxl",
+    "pandas",
+    "requests",
+]
+
+[project.optional-dependencies]
+backtest = [
+    "akshare",
+    "numpy",
+]
+legacy = [
+    "baostock",
+    "numpy",
+]
