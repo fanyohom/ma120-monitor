@@ -40,6 +40,23 @@ ma120-monitor/
 
 ## 用法
 
+### 安装 uv
+
+本项目使用 `uv` 管理 Python、虚拟环境和依赖。首次使用先安装 `uv`：
+
+```powershell
+# Windows（推荐）
+winget install --id=astral-sh.uv -e
+```
+
+macOS / Linux：
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+安装后运行 `uv --version` 确认命令可用。项目通过 `pyproject.toml` 声明依赖，并用 `uv.lock` 锁定版本；首次执行 `uv run` 时会自动准备 Python 3.12 和项目环境。
+
 ### 首次配置
 
 项目提供了 `.env.example` 模板。先复制一份为 `.env.local`：
@@ -64,16 +81,22 @@ $env:PYTHONUTF8='1'
 $env:UV_CACHE_DIR='D:\Project\github\ma120-monitor\.uv-cache'
 
 # 持仓 + 关注池（默认推送飞书卡片）
-uv run --with pandas --with openpyxl --with requests python stock_dynamic_monitor.py
+uv run python stock_dynamic_monitor.py
 
 # 只看终端，不发飞书
-uv run --with pandas --with openpyxl --with requests python stock_dynamic_monitor.py --no-feishu
+uv run python stock_dynamic_monitor.py --no-feishu
 
 # 只看持仓
-uv run --with pandas --with openpyxl --with requests python stock_dynamic_monitor.py --portfolio --no-feishu
+uv run python stock_dynamic_monitor.py --portfolio --no-feishu
 
 # 只看关注池
-uv run --with pandas --with openpyxl --with requests python stock_dynamic_monitor.py --watchlist --no-feishu
+uv run python stock_dynamic_monitor.py --watchlist --no-feishu
+
+# 运行测试
+uv run python -m unittest discover -s tests
+
+# 运行近 5 年历史回测
+uv run --extra backtest python backtest_ma120_strategy.py
 ```
 
 ### macOS / Linux
@@ -84,10 +107,10 @@ export PYTHONUTF8=1
 export UV_CACHE_DIR="$PWD/.uv-cache"
 
 # 持仓 + 关注池（默认推送飞书卡片）
-uv run --with pandas --with openpyxl --with requests python stock_dynamic_monitor.py
+uv run python stock_dynamic_monitor.py
 
 # 只看终端，不发飞书
-uv run --with pandas --with openpyxl --with requests python stock_dynamic_monitor.py --no-feishu
+uv run python stock_dynamic_monitor.py --no-feishu
 ```
 
 ## 配置
@@ -115,7 +138,7 @@ uv run --with pandas --with openpyxl --with requests python stock_dynamic_monito
 
 港股代码请使用 `HK` 加 5 位数字，例如信达生物写作 `HK01801`，以保留前导零并自动切换港股行情源。
 
-**依赖：** 脚本通过 `uv run --with ...` 自动准备 `pandas/openpyxl/requests`。
+**依赖：** `uv run` 会根据 `pyproject.toml` 和 `uv.lock` 自动准备固定版本的 Python 与项目依赖，无需手动执行 `pip install`。回测依赖按需通过 `--extra backtest` 安装，旧版脚本依赖按需通过 `--extra legacy` 安装，不影响主监控的首次启动速度。
 
 **飞书推送配置优先级：**
 
