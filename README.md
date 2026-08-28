@@ -2,6 +2,12 @@
 
 基于 **MA120 均线** 的持仓 & 关注池监控脚本，每日通过飞书推送买入/卖出信号。
 
+## 效果示例
+
+飞书卡片推送效果示例：
+
+![飞书 MA120 监控卡片示例](doc/images/Snipaste_2026-08-28_16-26-19.png)
+
 ## 策略
 
 - **MA120：** 最近 120 个交易日收盘价的算术平均值，即 `sum(最近 120 个交易日收盘价) / 120`；不足 120 根日 K 的股票会跳过。
@@ -35,6 +41,7 @@ ma120-monitor/
 ├── stock_portfolio_monitor.py   # 旧版（保留备查）
 ├── backtest_ma120_strategy.py   # MA120 策略回测工具
 ├── stocks.xlsx                  # 数据源（sheet: portfolio / watchlist）
+├── doc/images/                  # README 示例图片
 └── .stock_cache/                # 日 K 行情缓存（当天有效，一只一个 JSON）
 ```
 
