@@ -41,7 +41,13 @@ ma120-monitor/
 ├── stock_portfolio_monitor.py   # 旧版（保留备查）
 ├── backtest_ma120_strategy.py   # MA120 策略回测工具
 ├── stocks.xlsx                  # 数据源（sheet: portfolio / watchlist）
+├── pyproject.toml               # 项目元数据与依赖清单
+├── uv.lock                      # 依赖锁定文件
+├── conftest.py                  # pytest 路径配置
+├── tests/                       # 单元测试（飞书卡片 / 行情数据）
+├── .env.example                 # 飞书 webhook 配置模板
 ├── doc/images/                  # README 示例图片
+├── LICENSE                      # MIT
 └── .stock_cache/                # 日 K 行情缓存（当天有效，一只一个 JSON）
 ```
 
@@ -153,8 +159,18 @@ uv run python stock_dynamic_monitor.py --no-feishu
 2. 项目根目录 `.env.local` 中的 `FEISHU_WEBHOOK_URL`
 3. 都没配置时，脚本会跳过飞书推送并在终端提示
 
-## 定时调度
+## 定时运行（可选）
 
-配在 OpenClaw cron：每周一~五 18:30 (Asia/Shanghai) 自动执行，结果推飞书。
+用系统 crontab 每个交易日收盘后自动执行（示例为周一至周五 18:30）：
 
-Job id: `656d2346-16c5-4d00-a3ed-e4a9589f3e14`
+```bash
+30 18 * * 1-5 cd /path/to/ma120-monitor && /usr/bin/env uv run python stock_dynamic_monitor.py >> monitor.log 2>&1
+```
+
+## 免责声明
+
+本项目仅供学习与研究使用，不构成任何投资建议。股市有风险，投资需谨慎；据此操作，风险自担。行情数据来自第三方公开接口，不保证其准确性与实时性。
+
+## License
+
+[MIT](LICENSE)
