@@ -1,9 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "ma120-monitor"
 version = "0.1.0"
 description = "MA120 stock portfolio and watchlist monitor"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
+license = { text = "MIT" }
+authors = [{ name = "Fan-Yu-Feng" }]
+keywords = ["MA120", "stock", "monitor", "feishu", "quant"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
 dependencies = [
     "openpyxl",
     "pandas",
@@ -19,3 +32,17 @@ legacy = [
     "baostock",
     "numpy",
 ]
+dev = [
+    "pytest>=7.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/fanyohom/ma120-monitor"
+Repository = "https://github.com/fanyohom/ma120-monitor"
+Issues = "https://github.com/fanyohom/ma120-monitor/issues"
+
+[tool.setuptools]
+py-modules = ["stock_dynamic_monitor", "backtest_ma120_strategy"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
