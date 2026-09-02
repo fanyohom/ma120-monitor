@@ -28,3 +28,6 @@ CLAUDE.local.md
 .uv-cache/
 .stock_cache/
 backtest_results/
+
+# WorkBuddy 本地工作区
+.workbuddy/
