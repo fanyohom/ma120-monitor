@@ -160,11 +160,9 @@ uv run python stock_dynamic_monitor.py --no-feishu
 2. 项目根目录 `.env.local` 中的 `FEISHU_WEBHOOK_URL`
 3. 都没配置时，脚本会跳过飞书推送并在终端提示
 
-## 定时运行（可选）
+## 定时运行
 
-### 方式一：GitHub Actions（推荐，无需本机常开）
-
-仓库已内置 workflow：`.github/workflows/ma120-monitor.yml`，每周一至周五 **UTC 10:30**（北京时间 18:30）自动执行。
+仓库已内置 GitHub Actions workflow：`.github/workflows/ma120-monitor.yml`，每周一至周五 **UTC 10:30**（北京时间 18:30）自动执行，无需本机常开。
 
 启用步骤：
 
@@ -173,16 +171,6 @@ uv run python stock_dynamic_monitor.py --no-feishu
 3. 打开 **Actions** 页签，选择 `MA120 Monitor` → **Run workflow** 手动触发一次验证
 
 > 说明：GitHub 的定时任务只支持 UTC，且不保证准点（高峰时可能延迟数分钟到数十分钟）。未配置 secret 时脚本不会报错，只会在日志里提示跳过飞书推送。
-
-### 方式二：本机 crontab
-
-每个交易日收盘后自动执行（示例为周一至周五 18:30，注意替换为实际路径和 `uv` 绝对路径）：
-
-```bash
-30 18 * * 1-5 cd /path/to/ma120-monitor && /path/to/uv run python stock_dynamic_monitor.py >> monitor.log 2>&1
-```
-
-> 注意：cron 的 `PATH` 很窄，必须写 `uv` 的绝对路径（可用 `command -v uv` 查看）；电脑关机或睡眠时任务会被跳过且不补跑。需要补跑能力请用 macOS `launchd`。
 
 ## 免责声明
 
