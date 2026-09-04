@@ -14,12 +14,16 @@ MA120 持仓 & 关注池监控（Sina 数据源）
   python3 stock_dynamic_monitor.py --portfolio  # 仅持仓
   python3 stock_dynamic_monitor.py --watchlist  # 仅关注池
   python3 stock_dynamic_monitor.py --no-feishu  # 不发飞书
+  python3 stock_dynamic_monitor.py --skip-non-trading-day
+          # 非 A 股交易日直接跳过（法定节假日调休时不会空推卡片）
+          # 注意：只在 09:30 之后调用判断才可靠，开盘前无法区分「未开盘」和「非交易日」
 """
 
 import json
 import os
 import sys
 import time
+import unicodedata
 import warnings
 from datetime import datetime
 
@@ -354,13 +358,13 @@ def check_ma120_signal(df: pd.DataFrame, current_price: float | None = None) -> 
         result["signal"] = "buy"
         result["message"] = (
             f"🔥 买入：{price:.2f} < 买入线 {buy_line:.2f}  "
-            f"MA120 {ma120:.2f}  偏离 {ma120_pct:.2f}%"
+            f"MA120 {ma120:.2f}  偏离MA120 {ma120_pct:.2f}%"
         )
     elif price > ma120 * SELL_THRESHOLD and prev_price <= prev_ma120 * SELL_THRESHOLD:
         result["signal"] = "sell"
         result["message"] = (
             f"📤 卖出：{price:.2f} > 卖出线 {sell_line:.2f}  "
-            f"MA120 {ma120:.2f}  偏离 {ma120_pct:.2f}%"
+            f"MA120 {ma120:.2f}  偏离MA120 {ma120_pct:.2f}%"
         )
     elif price >= ma120:
         result["message"] = f"📈 高于 MA120 {ma120:.2f}  {ma120_pct:+.2f}%  卖出线 {sell_line:.2f}"
@@ -482,13 +486,33 @@ def _position_label(r: dict) -> str:
     return "高于MA120" if r["ma120_pct"] >= 0 else "低于MA120"
 
 
+def _buy_line_pct(r: dict) -> float:
+    """现价相对**买入线**的距离（%），负数表示已跌破买入线。
+
+    注意与 `ma120_pct` 区分：后者的基准是 MA120。买入线 = MA120 × 0.88，
+    所以现价在买入线下方时，到 MA120 的距离必然比到买入线的距离大得多。
+    """
+    return (r["price"] - r["buy_line"]) / r["buy_line"] * 100
+
+
+def _display_width(text: str) -> int:
+    """终端显示宽度：中文等全角字符占 2 格，ASCII 占 1 格。"""
+    return sum(2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1 for ch in str(text))
+
+
+def _pad(text: str, width: int) -> str:
+    """按显示宽度右侧补空格，保证中文列也能对齐。"""
+    text = str(text)
+    return text + " " * max(0, width - _display_width(text))
+
+
 def _print_console_table(title: str, items: list) -> None:
     print(f"\n{title} {len(items)} 支")
     if not items:
         print("  无数据")
         return
 
-    headers = ["股票", "代码", "现价", "MA120", "偏离", "买入线", "卖出线", "状态"]
+    headers = ["股票", "代码", "现价", "MA120", "偏离MA120", "买入线", "距买入线", "卖出线", "状态"]
     rows = []
     for item in _sort_items(items):
         rows.append(
@@ -499,15 +523,19 @@ def _print_console_table(title: str, items: list) -> None:
                 f"{item['ma120']:.2f}",
                 f"{item['ma120_pct']:+.2f}%",
                 f"{item['buy_line']:.2f}",
+                f"{_buy_line_pct(item):+.2f}%",
                 f"{item['sell_line']:.2f}",
                 _position_label(item),
             ]
         )
 
-    widths = [max(len(headers[i]), max(len(row[i]) for row in rows)) for i in range(len(headers))]
+    widths = [
+        max(_display_width(headers[i]), max(_display_width(row[i]) for row in rows))
+        for i in range(len(headers))
+    ]
 
     def fmt(row):
-        return "| " + " | ".join(str(cell).ljust(widths[i]) for i, cell in enumerate(row)) + " |"
+        return "| " + " | ".join(_pad(cell, widths[i]) for i, cell in enumerate(row)) + " |"
 
     print(fmt(headers))
     print("|-" + "-|-".join("-" * width for width in widths) + "-|")
@@ -531,7 +559,7 @@ def render_portfolio_text(items: list, today: str) -> str:
             signal_count[item["signal"]] += 1
         line = (
             f"{tag}  {item['name']} ({item['code']})  现价 {item['price']:.2f}  "
-            f"MA120 {item['ma120']:.2f}  偏离 {item['ma120_pct']:+.2f}%"
+            f"MA120 {item['ma120']:.2f}  偏离MA120 {item['ma120_pct']:+.2f}%"
         )
         if item.get("cost") and item.get("shares"):
             pnl_pct = (item["price"] - item["cost"]) / item["cost"] * 100
@@ -574,7 +602,7 @@ def render_watchlist_text(items: list, today: str) -> str:
             signal_count[item["signal"]] += 1
         line = (
             f"{tag}  {item['name']} ({item['code']})  现价 {item['price']:.2f}  "
-            f"MA120 {item['ma120']:.2f}  偏离 {item['ma120_pct']:+.2f}%"
+            f"MA120 {item['ma120']:.2f}  偏离MA120 {item['ma120_pct']:+.2f}%"
         )
         if item["signal"] == "buy":
             line += f"  → 买入线 {item['buy_line']:.2f}"
@@ -631,6 +659,7 @@ def _card_table_row(item: dict, include_portfolio: bool = False) -> dict:
         "ma120": f"{item['ma120']:.2f}",
         "diff": f"{item['ma120_pct']:+.2f}%",
         "buy_line": f"{item['buy_line']:.2f}",
+        "buy_diff": f"{_buy_line_pct(item):+.2f}%",
         "sell_line": f"{item['sell_line']:.2f}",
     }
     if include_portfolio:
@@ -648,8 +677,9 @@ def _card_table_columns(include_portfolio: bool = False) -> list:
         ("stock", "股票"),
         ("price", "现价"),
         ("ma120", "MA120"),
-        ("diff", "偏离"),
+        ("diff", "偏离MA120"),
         ("buy_line", "买入线"),
+        ("buy_diff", "距买入线"),
         ("sell_line", "卖出线"),
     ]
     if include_portfolio:
@@ -732,7 +762,8 @@ def _triggered_signal_summary(items: list) -> str:
         lines.append(
             f"{label}：{item['name']} {item['code']} | "
             f"现价 {item['price']:.2f} {comparator} {line_name} {line_value:.2f} | "
-            f"MA120 {item['ma120']:.2f} | 偏离 {item['ma120_pct']:+.2f}%"
+            f"MA120 {item['ma120']:.2f} | 偏离MA120 {item['ma120_pct']:+.2f}% | "
+            f"距买入线 {_buy_line_pct(item):+.2f}%"
         )
     return "\n".join(lines)
 
@@ -810,10 +841,33 @@ def render_watchlist_card(items: list, today: str) -> dict:
     )
 
 
+# ---------- 交易日判断 ----------
+TRADING_DAY_PROBES = ("600015", "601318", "000651")
+
+
+def is_trading_day() -> bool:
+    """用几支流动性好的大盘股探测今天是不是 A 股交易日。
+
+    只在 09:30 之后调用才可靠：交易日内这个时点实时行情必然取得到
+    （午休时段返回的是上午收盘价）；开盘前取不到价，无法区分
+    「还没开盘」和「非交易日」。
+    """
+    today = datetime.now().strftime("%Y-%m-%d")
+    for code in TRADING_DAY_PROBES:
+        quote = get_stock_realtime_quote(code)
+        if quote.get("price_source") == "realtime" and quote.get("quote_date") == today:
+            return True
+    return False
+
+
 # ---------- 主流程 ----------
-def run(mode: str = "all", feishu: bool = True):
+def run(mode: str = "all", feishu: bool = True, skip_non_trading_day: bool = False):
     today = datetime.now().strftime("%Y-%m-%d")
     print(f"\n{'=' * 60}\n📊 MA120 监控 · {today}  mode={mode}\n{'=' * 60}")
+
+    if skip_non_trading_day and not is_trading_day():
+        print("\n⏭️  今天不是 A 股交易日（探测不到当日实时行情），已跳过监控与飞书推送。")
+        return {"portfolio": [], "watchlist": []}
 
     portfolio_items = []
     watchlist_items = []
@@ -870,4 +924,5 @@ if __name__ == "__main__":
     elif "--watchlist" in args:
         mode = "watchlist"
     feishu = "--no-feishu" not in args
-    run(mode=mode, feishu=feishu)
+    skip_non_trading_day = "--skip-non-trading-day" in args
+    run(mode=mode, feishu=feishu, skip_non_trading_day=skip_non_trading_day)

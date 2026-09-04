@@ -43,12 +43,15 @@ class FeishuCardTests(unittest.TestCase):
         self.assertEqual(table["tag"], "table")
         self.assertEqual(
             [column["display_name"] for column in table["columns"]],
-            ["状态", "股票", "现价", "MA120", "偏离", "买入线", "卖出线"],
+            ["状态", "股票", "现价", "MA120", "偏离MA120", "买入线", "距买入线", "卖出线"],
         )
         self.assertEqual(table["rows"][0]["status"], "低于买入线")
         self.assertEqual(table["rows"][0]["stock"], "三花智控 002050")
         self.assertEqual(table["rows"][0]["price"], "38.30")
         self.assertEqual(table["rows"][0]["ma120"], "45.91")
+        # 距买入线基准是买入线：(38.30 - 40.41) / 40.41 = -5.22%
+        # 而不是相对 MA120 的 -16.58%，两个口径不能混
+        self.assertEqual(table["rows"][0]["buy_diff"], "-5.22%")
 
     def test_card_marks_buy_zone_green(self):
         items = [
@@ -168,7 +171,10 @@ class FeishuCardTests(unittest.TestCase):
 
         self.assertEqual(
             [column["display_name"] for column in table["columns"]],
-            ["状态", "股票", "现价", "MA120", "偏离", "买入线", "卖出线", "成本", "浮盈"],
+            [
+                "状态", "股票", "现价", "MA120", "偏离MA120",
+                "买入线", "距买入线", "卖出线", "成本", "浮盈",
+            ],
         )
         self.assertEqual(table["rows"][0]["status"], "高于MA120")
         self.assertEqual(table["rows"][0]["stock"], "紫金矿业 601899")
@@ -240,6 +246,36 @@ class FeishuCardTests(unittest.TestCase):
         content = _markdown_content(payload)
 
         self.assertNotIn("重点提醒", content)
+
+
+class DeviationBaselineTests(unittest.TestCase):
+    """锁死两个偏离口径的基准，防止再次混淆。
+
+    真实案例（2026-09-03 英维克 002837）：现价 66.23、MA120 79.92、买入线 70.33。
+    曾误以为卡片上的 -17.12% 是相对买入线算的，其实它的基准是 MA120；
+    相对买入线的距离只有 -5.83%，两者差的就是 MA120×12% 的那条带宽。
+    """
+
+    def _yingweike(self):
+        return {"price": 66.23, "ma120": 79.92, "buy_line": 70.33}
+
+    def test_ma120_pct_uses_ma120_as_baseline(self):
+        item = self._yingweike()
+        ma120_pct = (item["price"] - item["ma120"]) / item["ma120"] * 100
+        self.assertAlmostEqual(ma120_pct, -17.13, places=2)
+
+    def test_buy_line_pct_uses_buy_line_as_baseline(self):
+        self.assertAlmostEqual(monitor._buy_line_pct(self._yingweike()), -5.83, places=2)
+
+    def test_distance_to_ma120_exceeds_distance_to_buy_line_when_below(self):
+        """现价在买入线下方时，到 MA120 的距离必然大于到买入线的距离。"""
+        item = self._yingweike()
+        ma120_pct = (item["price"] - item["ma120"]) / item["ma120"] * 100
+        self.assertGreater(abs(ma120_pct), abs(monitor._buy_line_pct(item)))
+
+    def test_buy_line_pct_positive_above_buy_line(self):
+        item = {"price": 75.00, "ma120": 79.92, "buy_line": 70.33}
+        self.assertGreater(monitor._buy_line_pct(item), 0)
 
 
 if __name__ == "__main__":
