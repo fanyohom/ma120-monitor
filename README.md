@@ -11,9 +11,13 @@
 ## 策略
 
 - **MA120：** 最近 120 个交易日收盘价的算术平均值，即 `sum(最近 120 个交易日收盘价) / 120`；不足 120 根日 K 的股票会跳过。
-- **偏离率：** `(现价 - MA120) / MA120 × 100%`。
+- **偏离率：** `(现价 - MA120) / MA120 × 100%`，**基准是 MA120**，展示为「偏离MA120」列。
 - **买入线：** `MA120 × 0.88`，即低于 MA120 约 12%。
 - **卖出线：** `MA120 × 1.12`，即高于 MA120 约 12%。
+- **距买入线：** `(现价 - 买入线) / 买入线 × 100%`，**基准是买入线**，展示为「距买入线」列。
+
+> **两个偏离口径别看混了。** 买入线本身就是 `MA120 × 0.88` 派生出来的，所以现价在买入线下方时，它到 MA120 的距离**必然**比到买入线的距离大得多 —— 差的那部分正是 MA120×12% 的带宽。
+> 例：现价 66.23、MA120 79.92、买入线 70.33 → 偏离MA120 **-17.12%**（差 13.69 元），距买入线 **-5.83%**（差 4.10 元）。两个都对，只是基准不同。
 
 ### 行情口径
 
@@ -23,6 +27,7 @@
 - **MA120：** 只根据日 K 收盘价序列计算，实时价不会直接替换均线序列中的收盘价。
 - **缓存：** 日 K 本地 JSON 缓存在 `.stock_cache/`，同一自然日内复用，跨日自动刷新；实时盘口不走本地缓存。
 - **回退：** 实时盘口请求失败时，现价会回退到日 K 最新收盘价，保证脚本不中断。
+- **交易日判断：** 带上 `--skip-non-trading-day` 时，会先用几支大盘股（600015/601318/000651）探测当日实时行情；取不到就判定为非交易日并跳过推送，避免法定节假日调休时空推卡片。该判断**只在 09:30 之后可靠**——开盘前取不到实时价，无法区分「还没开盘」和「非交易日」。
 
 ### 信号判定
 
@@ -99,6 +104,9 @@ uv run python stock_dynamic_monitor.py
 # 只看终端，不发飞书
 uv run python stock_dynamic_monitor.py --no-feishu
 
+# 非 A 股交易日直接跳过，不推卡片（定时任务的推荐用法）
+uv run python stock_dynamic_monitor.py --skip-non-trading-day
+
 # 只看持仓
 uv run python stock_dynamic_monitor.py --portfolio --no-feishu
 
@@ -164,8 +172,10 @@ uv run python stock_dynamic_monitor.py --no-feishu
 用系统 crontab 每个交易日收盘后自动执行（示例为周一至周五 18:30）：
 
 ```bash
-30 18 * * 1-5 cd /path/to/ma120-monitor && /usr/bin/env uv run python stock_dynamic_monitor.py >> monitor.log 2>&1
+30 18 * * 1-5 cd /path/to/ma120-monitor && /usr/bin/env uv run python stock_dynamic_monitor.py --skip-non-trading-day >> monitor.log 2>&1
 ```
+
+crontab 的 `1-5` 只能表达「周一至周五」，遇法定节假日仍会触发。加上 `--skip-non-trading-day` 后，脚本会在这些日子自动跳过、不推无意义的卡片（那时拿到的现价是上一交易日的收盘价，结果与节前完全一样）。
 
 ## 免责声明
 

@@ -29,5 +29,8 @@ CLAUDE.local.md
 .stock_cache/
 backtest_results/
 
+# 改表前的备份（stocks.xlsx.bak.<日期>），用于误删回滚，不入版本库
+stocks.xlsx.bak.*
+
 # WorkBuddy 本地工作区
 .workbuddy/
