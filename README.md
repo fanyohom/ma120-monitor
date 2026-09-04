@@ -162,12 +162,7 @@ uv run python stock_dynamic_monitor.py --no-feishu
 
 ## 定时运行
 
-仓库已内置 GitHub Actions workflow：`.github/workflows/ma120-monitor.yml`，每周一至周五自动执行两次，无需本机常开：
-
-| 北京时间 | UTC | 场景 |
-|---|---|---|
-| 11:30 | 03:30 | A 股午间休市、港股盘中 |
-| 18:30 | 10:30 | A 股与港股收盘后 |
+仓库已内置 GitHub Actions workflow：`.github/workflows/ma120-monitor.yml`，每周一至周五 **UTC 10:30**（北京时间 18:30，A 股与港股收盘后）自动执行，无需本机常开。
 
 启用步骤：
 
@@ -175,10 +170,7 @@ uv run python stock_dynamic_monitor.py --no-feishu
 2. 名称填 `FEISHU_WEBHOOK_URL`，值填你的飞书群机器人 webhook
 3. 打开 **Actions** 页签，选择 `MA120 Monitor` → **Run workflow** 手动触发一次验证
 
-> 说明：
->
-> - GitHub 的定时任务只支持 UTC，且不保证准点（高峰时可能延迟数分钟到数十分钟）。未配置 secret 时脚本不会报错，只会在日志里提示跳过飞书推送。
-> - 一天跑两次时，两次的信号判定都基于"上一交易日收盘"，所以盘中触发过的信号在收盘那次会**重复推送**。介意的话删掉 workflow 里 11:30 那行即可。
+> 说明：GitHub 的定时任务只支持 UTC，且不保证准点（高峰时可能延迟数分钟到数十分钟）。未配置 secret 时脚本不会报错，只会在日志里提示跳过飞书推送。
 
 ## 免责声明
 
