@@ -51,6 +51,7 @@ ma120-monitor/
 ├── conftest.py                  # pytest 路径配置
 ├── tests/                       # 单元测试（飞书卡片 / 行情数据）
 ├── .env.example                 # 飞书 webhook 配置模板
+├── .github/workflows/           # GitHub Actions 定时任务
 ├── doc/images/                  # README 示例图片
 ├── LICENSE                      # MIT
 └── .stock_cache/                # 日 K 行情缓存（当天有效，一只一个 JSON）
@@ -167,15 +168,22 @@ uv run python stock_dynamic_monitor.py --no-feishu
 2. 项目根目录 `.env.local` 中的 `FEISHU_WEBHOOK_URL`
 3. 都没配置时，脚本会跳过飞书推送并在终端提示
 
-## 定时运行（可选）
+## 定时运行
 
-用系统 crontab 每个交易日收盘后自动执行（示例为周一至周五 18:30）：
+仓库已内置 GitHub Actions workflow：`.github/workflows/ma120-monitor.yml`，每周一至周五 **UTC 04:00**（北京时间 12:00，A 股与港股午间休市）自动执行，无需本机常开。
 
-```bash
-30 18 * * 1-5 cd /path/to/ma120-monitor && /usr/bin/env uv run python stock_dynamic_monitor.py --skip-non-trading-day >> monitor.log 2>&1
-```
+启用步骤：
 
-crontab 的 `1-5` 只能表达「周一至周五」，遇法定节假日仍会触发。加上 `--skip-non-trading-day` 后，脚本会在这些日子自动跳过、不推无意义的卡片（那时拿到的现价是上一交易日的收盘价，结果与节前完全一样）。
+1. 进入仓库 **Settings → Secrets and variables → Actions → New repository secret**
+2. 名称填 `FEISHU_WEBHOOK_URL`，值填你的飞书群机器人 webhook
+3. 打开 **Actions** 页签，选择 `MA120 Monitor` → **Run workflow** 手动触发一次验证
+
+> 说明：
+>
+> - GitHub 的定时任务只支持 UTC，且**不保证准点** —— 实测曾延迟约 4 小时。未配置 secret 时脚本不会报错，只会在日志里提示跳过飞书推送。
+> - 定时设在午间休市，取到的是**上午收盘价**，因此信号为盘中口径，与收盘后跑的结果可能不同。
+
+定时规则的 `1-5` 只能表达「周一至周五」，遇法定节假日仍会触发。当前 workflow 未开启交易日过滤；需要时可在运行命令末尾添加 `--skip-non-trading-day`，脚本会在探测不到当日行情时跳过监控和推送。
 
 ## 免责声明
 
