@@ -104,7 +104,7 @@ def _is_hk_code(stock_code: str) -> bool:
 
 
 def _sina_symbol(stock_code: str) -> str:
-    return f"sh{stock_code}" if stock_code.startswith("6") else f"sz{stock_code}"
+    return f"sh{stock_code}" if stock_code.startswith(("5", "6")) else f"sz{stock_code}"
 
 
 def _tencent_symbol(stock_code: str) -> str:
@@ -918,6 +918,13 @@ def run(mode: str = "all", feishu: bool = True, skip_non_trading_day: bool = Fal
 
 if __name__ == "__main__":
     args = sys.argv[1:]
+    if "--etf" in args:
+        from etf_dca import main as etf_main
+
+        etf_args = [arg for arg in args if arg not in ("--etf", "--no-feishu")]
+        if "--no-feishu" not in args and "--feishu" not in etf_args:
+            etf_args.append("--feishu")
+        sys.exit(etf_main(etf_args))
     mode = "all"
     if "--portfolio" in args:
         mode = "portfolio"

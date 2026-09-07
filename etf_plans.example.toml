@@ -1,0 +1,79 @@
+# Copy to etf_plans.toml. Amounts are CNY; these are editable preview defaults.
+version = 1
+
+[settings]
+ma_days = 500
+lot_size = 100
+# First matching strict upper bound wins. Above the last band use above_multiplier.
+bands = [
+  { below = -20, multiplier = 2.0 },
+  { below = -10, multiplier = 1.5 },
+  { below = 0, multiplier = 1.2 },
+  { below = 10, multiplier = 1.0 },
+  { below = 20, multiplier = 0.8 },
+]
+above_multiplier = 0.5
+
+[valuation]
+lookback_years = 10
+min_samples = 2000
+min_span_days = 3285
+max_age_days = 7
+buy_below = 30
+high_at = 70
+
+[[plans]]
+id = "csi300"
+name = "沪深300ETF"
+code = "510300"
+index_code = "000300"
+strategy = "ma"
+base_amount = 1000
+max_amount = 2000
+frequency = "weekly"
+weekday = 0
+cost = 0
+shares = 0
+valuation_csv = "etf_valuations/000300.csv"
+
+[[plans]]
+id = "csi1000"
+name = "中证1000ETF"
+code = "512100"
+index_code = "000852"
+strategy = "ma"
+base_amount = 1000
+max_amount = 2000
+frequency = "weekly"
+weekday = 0
+cost = 0
+shares = 0
+valuation_csv = "etf_valuations/000852.csv"
+
+[[plans]]
+id = "sp500"
+name = "标普500ETF"
+code = "513500"
+index_code = "SPX"
+strategy = "ma"
+base_amount = 1000
+max_amount = 2000
+frequency = "weekly"
+weekday = 0
+cost = 0
+shares = 0
+valuation_csv = "etf_valuations/SPX.csv"
+
+[[plans]]
+id = "nasdaq100"
+name = "纳斯达克100ETF"
+code = "513100"
+index_code = "NDX"
+strategy = "ma"
+base_amount = 1000
+max_amount = 2000
+frequency = "weekly"
+weekday = 0
+cost = 0
+shares = 0
+valuation_csv = "etf_valuations/NDX.csv"
