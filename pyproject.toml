@@ -42,7 +42,7 @@ Repository = "https://github.com/fanyohom/ma120-monitor"
 Issues = "https://github.com/fanyohom/ma120-monitor/issues"
 
 [tool.setuptools]
-py-modules = ["stock_dynamic_monitor", "backtest_ma120_strategy"]
+py-modules = ["stock_dynamic_monitor", "backtest_ma120_strategy", "etf_dca", "etf_data"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

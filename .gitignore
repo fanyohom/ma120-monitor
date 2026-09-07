@@ -28,6 +28,9 @@ CLAUDE.local.md
 .uv-cache/
 .stock_cache/
 backtest_results/
+etf_plans.toml
+etf_valuations/
+dca_results/
 
 # 改表前的备份（stocks.xlsx.bak.<日期>），用于误删回滚，不入版本库
 stocks.xlsx.bak.*
