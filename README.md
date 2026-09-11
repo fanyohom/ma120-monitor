@@ -172,6 +172,8 @@ uv run python stock_dynamic_monitor.py --no-feishu
 
 股票 MA120 和 ETF 定投是两个独立入口。ETF 模块只生成计划、保存结果和登记你已经成交的交易，**不连接券商、不自动下单**。ETF 清单不放在 `stocks.xlsx`，避免与股票信号混在一起。
 
+投资方法背景见 [指数基金定投策略指南](doc/index-fund-investment-guide.md)：包含普通定投、涨跌幅定投、均线定投、估值定投、作者的退出思路，以及与当前实现的差异。
+
 ### 启动与清单
 
 首次在项目目录执行（已有本地配置时不要覆盖）：
