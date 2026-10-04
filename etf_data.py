@@ -37,18 +37,19 @@ def parse_history(rows: list) -> pd.Series:
     return frame.set_index("date")["close"].sort_index()
 
 
-def fetch_market(code: str, days: int, now: datetime, cache_dir: Path) -> dict:
+def fetch_market(code: str, days: int, now: datetime, cache_dir: Path, force: bool = False) -> dict:
     """Keep dated snapshots; reuse only a complete snapshot from the last 5 minutes."""
     symbol = etf_symbol(code)
     folder = cache_dir / now.date().isoformat()
-    for path in sorted(folder.glob(f"{code}_*.json"), reverse=True):
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-            age = (now - datetime.fromisoformat(payload["fetched_at"])).total_seconds()
-            if 0 <= age <= 300 and payload["requested_days"] >= days:
-                return payload
-        except (ValueError, TypeError, KeyError, OSError):
-            continue
+    if not force:
+        for path in sorted(folder.glob(f"{code}_*.json"), reverse=True):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                age = (now - datetime.fromisoformat(payload["fetched_at"])).total_seconds()
+                if 0 <= age <= 300 and payload["requested_days"] >= days:
+                    return payload
+            except (ValueError, TypeError, KeyError, OSError):
+                continue
 
     histories = {}
     for adjustment in ("qfq", ""):

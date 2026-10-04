@@ -101,6 +101,18 @@ class ETFDataTests(unittest.TestCase):
                     data.fetch_market("510300", 530, NOW, Path(folder))
                 get.assert_called_once()
 
+    def test_forced_refresh_bypasses_recent_cache(self):
+        with tempfile.TemporaryDirectory() as folder:
+            target = Path(folder) / NOW.date().isoformat()
+            target.mkdir()
+            (target / "510300_140000.json").write_text(json.dumps({
+                "fetched_at": NOW.isoformat(), "requested_days": 530,
+            }))
+            with patch("etf_data.requests.get", side_effect=OSError("fresh request")) as get:
+                with self.assertRaisesRegex(OSError, "fresh request"):
+                    data.fetch_market("510300", 530, NOW, Path(folder), force=True)
+                get.assert_called_once()
+
 
 class ValuationTests(unittest.TestCase):
     def setUp(self):
