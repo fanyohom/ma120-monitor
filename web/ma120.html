@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MA120 监控 | 投资计划</title>
+  <link rel="stylesheet" href="/app.css">
+  <link rel="stylesheet" href="/ma120.css">
+  <script src="/ma120.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="brand-mark">M</span><span>投资计划</span><span class="brand-divider"></span><span class="brand-sub">MA120 监控</span></div>
+    <div class="top-actions"><span class="mode-badge">本地股票清单</span><button id="stockRefresh" class="primary-btn" type="button" title="重新读取股票日 K 和报价，不会推送或下单"><span aria-hidden="true">↻</span> 刷新行情</button></div>
+  </header>
+  <nav class="primary-nav" aria-label="工作台"><div class="primary-nav-inner"><a href="/">ETF 定投</a><a class="active" href="/ma120" aria-current="page">MA120 股票</a></div></nav>
+
+  <main class="layout">
+    <div id="stockNotice" class="notice" hidden></div>
+    <p id="stockRefreshFeedback" class="refresh-feedback" role="status" hidden></p>
+    <div class="page-head"><div><div class="eyebrow">MARKET MONITOR</div><h1>MA120 监控</h1><p id="stockUpdated" class="muted">正在读取数据</p></div></div>
+
+    <section class="metrics" aria-label="股票监控摘要">
+      <div class="metric"><span>持仓股票</span><strong id="portfolioCount">—</strong><small>来自 portfolio 工作表</small></div>
+      <div class="metric"><span>关注股票</span><strong id="watchlistCount">—</strong><small>来自 watchlist 工作表</small></div>
+      <div class="metric"><span>今日买入信号</span><strong id="buySignals">—</strong><small>首次跌破买入线</small></div>
+      <div class="metric"><span>今日卖出信号</span><strong id="sellSignals">—</strong><small>首次突破卖出线</small></div>
+    </section>
+
+    <div id="stockPositionSummary" class="stock-position-summary" hidden><div><span>持仓浮盈亏</span><strong id="totalPnl">—</strong><small id="pnlCoverage">—</small></div><div><span>估算市值</span><strong id="totalValue">—</strong></div><div><span>持仓成本</span><strong id="totalBasis">—</strong></div></div>
+
+    <div class="stock-toolbar">
+      <div class="section-tabs" role="tablist" aria-label="股票清单">
+        <button class="tab active" type="button" data-scope="all" role="tab" aria-selected="true">全部</button>
+        <button class="tab" type="button" data-scope="portfolio" role="tab" aria-selected="false">持仓</button>
+        <button class="tab" type="button" data-scope="watchlist" role="tab" aria-selected="false">关注池</button>
+      </div>
+      <div class="stock-controls"><label class="sr-only" for="stockSearch">搜索股票</label><input id="stockSearch" type="search" placeholder="搜索名称或代码"><label class="sr-only" for="stockFilter">状态筛选</label><select id="stockFilter"><option value="all">全部状态</option><option value="buy">今日买入信号</option><option value="sell">今日卖出信号</option><option value="below_buy">低于买入线</option><option value="above_sell">高于卖出线</option><option value="between">区间内</option><option value="unavailable">数据待补</option></select></div>
+    </div>
+
+    <div class="section-title stock-list-head"><div><h2>监控清单</h2><p id="stockCountLabel">等待行情</p></div><span class="subtle-pill">MA120 × 0.88 / 1.12</span></div>
+    <div class="table-scroll"><table class="stock-table"><thead><tr><th>股票 / 分类</th><th>现价</th><th>MA120</th><th>偏离 MA</th><th>买入线</th><th>卖出线</th><th>状态</th><th>持仓浮盈亏</th><th></th></tr></thead><tbody id="stockRows"><tr><td class="empty-row" colspan="9">正在读取清单...</td></tr></tbody></table></div>
+  </main>
+
+  <dialog id="stockDialog" class="stock-dialog"><div class="stock-dialog-inner"><div class="dialog-head"><div><div class="eyebrow">MA120 DETAIL</div><h2 id="stockDetailName">—</h2><p id="stockDetailCode">—</p></div><button id="stockDialogClose" class="icon-btn" type="button" aria-label="关闭">×</button></div><span id="stockDetailStatus" class="status">—</span><div class="stock-detail-numbers"><div><span>现价</span><strong id="stockDetailPrice">—</strong></div><div><span>MA120</span><strong id="stockDetailMa">—</strong></div><div><span>偏离 MA120</span><strong id="stockDetailDeviation">—</strong></div></div><div class="stock-range"><div class="stock-range-labels"><span id="stockDetailBuy">—</span><span id="stockDetailSell">—</span></div><div class="stock-range-track"><span id="stockCurrentMarker" class="stock-current-marker"></span></div><div class="stock-range-labels"><span>买入线</span><span>卖出线</span></div></div><div class="stock-detail-extra"><div><span>持仓份额</span><strong id="stockDetailShares">—</strong></div><div><span>持仓成本</span><strong id="stockDetailBasis">—</strong></div><div><span>浮动盈亏</span><strong id="stockDetailPnl">—</strong></div><div><span>行情来源</span><strong id="stockDetailSource">—</strong></div></div><p id="stockDetailError" class="stock-detail-error" hidden></p></div></dialog>
+</body>
+</html>
