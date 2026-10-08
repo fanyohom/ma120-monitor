@@ -10,23 +10,32 @@
 <body>
   <header class="topbar">
     <div class="brand"><span class="brand-mark">M</span><span>投资计划</span><span class="brand-divider"></span><span class="brand-sub">ETF 工作台</span></div>
-    <div class="top-actions"><button id="modeBadge" class="mode-badge" type="button" aria-haspopup="dialog" title="查看当前计划" disabled>载入中</button><button id="refreshBtn" class="primary-btn" type="button" title="重新获取行情并计算建议，不会下单"><span aria-hidden="true">↻</span> 刷新行情</button></div>
+    <div class="top-actions"><button id="modeBadge" class="mode-badge" type="button" aria-haspopup="dialog" title="查看当前计划" disabled>载入中</button><button id="refreshBtn" class="primary-btn" type="button" title="更新行情与生效策略的估值数据并计算建议，不会下单"><span aria-hidden="true">↻</span> 刷新数据</button></div>
   </header>
   <nav class="primary-nav" aria-label="工作台"><div class="primary-nav-inner"><a class="active" href="/" aria-current="page">ETF 定投</a><a href="/ma120">MA120 股票</a></div></nav>
 
   <main class="layout">
     <div id="notice" class="notice" hidden></div>
     <p id="refreshFeedback" class="refresh-feedback" role="status" hidden></p>
+    <section id="tradeAlerts" class="trade-alerts" aria-live="polite" hidden>
+      <div class="trade-alert-head"><div><h2 id="tradeAlertTitle">交易提示</h2><p id="tradeAlertNote"></p></div><span id="tradeAlertCount" class="subtle-pill">—</span></div>
+      <div id="tradeAlertRows"></div>
+    </section>
     <div class="page-head">
       <div><div class="eyebrow">INVESTMENT MONITOR</div><h1>ETF 定投总览</h1><p id="updatedAt" class="muted">正在读取数据</p></div>
-      <div class="head-actions"><button id="tradeBtn" class="outline-btn" type="button">＋ 登记成交</button></div>
     </div>
 
     <section class="metrics" aria-label="计划摘要">
       <div class="metric"><span>生效计划</span><strong id="planCount">—</strong><small>仅选中策略计入预算</small></div>
       <div class="metric"><span>本期建议预算</span><strong id="actionAmount">—</strong><small>未下单 · 人民币</small></div>
-      <div class="metric"><span>可执行计划</span><strong id="buyCount">—</strong><small>按当前行情与计划周期</small></div>
+      <div class="metric"><span>触发买入条件</span><strong id="buyCount">—</strong><small>仅供策略提示，未下单</small></div>
       <div class="metric"><span>数据待补</span><strong id="blockedCount">—</strong><small>仅统计生效策略</small></div>
+    </section>
+
+    <section id="strategyGuide" class="strategy-guide" aria-label="定投策略说明">
+      <div class="strategy-guide-head"><h2>三种定投方式</h2><p id="strategyGuideNote">每只 ETF 只由一种策略计入本期预算</p></div>
+      <div id="strategyGuideMethods" class="strategy-guide-methods"></div>
+      <p class="strategy-guide-foot">普通固定金额定投尚无独立选项；当前没有自动卖出规则。这里的参数是可修改的计划示例，不是收益保证。</p>
     </section>
 
     <div class="section-tabs" role="tablist" aria-label="数据视图">
@@ -40,8 +49,15 @@
 
       <div id="detail" class="detail" hidden>
         <div class="detail-nav"><button id="backBtn" class="back-btn" type="button">← 全部 ETF</button><span>计划详情</span></div>
-        <div class="section-title detail-title"><div><div class="eyebrow">PLAN DETAIL</div><h1 id="detailName">—</h1><p id="detailMeta">—</p></div><div class="detail-actions"><span id="detailStatus" class="status">—</span><button id="detailTradeBtn" class="outline-btn" type="button">＋ 登记成交</button></div></div>
-        <div class="detail-grid"><div><span class="detail-label">当前价格</span><strong id="detailPrice">—</strong><small id="detailQuote">—</small></div><div><span class="detail-label">持仓份额</span><strong id="detailHoldings">—</strong><small id="detailCost">—</small></div><div><span class="detail-label">生效策略参考</span><strong id="detailReference">—</strong><small id="detailShares">—</small></div></div>
+        <div class="section-title detail-title"><div><div class="eyebrow">PLAN DETAIL</div><h1 id="detailName">—</h1><p id="detailMeta">—</p></div><span id="detailStatus" class="status">—</span></div>
+        <div id="detailStrategyLead" class="detail-strategy-lead"></div>
+        <div id="valuationSnapshot" class="valuation-snapshot" aria-label="生效估值指标" hidden>
+          <div><span>指数 PE-TTM</span><strong id="valuationPe">—</strong></div>
+          <div><span>历史估值分位</span><strong id="valuationPercentile">—</strong></div>
+          <div><span>估值数据日期</span><strong id="valuationDate">—</strong></div>
+          <p id="valuationWindow"></p>
+        </div>
+        <div class="detail-grid"><div><span class="detail-label">当前价格</span><strong id="detailPrice">—</strong><small id="detailQuote">—</small></div><div><span class="detail-label">实际持仓（不参与回溯）</span><strong id="detailHoldings">—</strong><small id="detailCost">—</small></div><div><span class="detail-label">生效策略参考</span><strong id="detailReference">—</strong><small id="detailShares">—</small></div></div>
         <section id="etfDefinition" class="etf-definition" hidden>
           <div class="definition-head"><h2>产品与指数</h2><span id="definitionCategory" class="subtle-pill">—</span></div>
           <p id="definitionSummary" class="definition-summary"></p>
@@ -53,10 +69,22 @@
         <div class="table-scroll"><table class="compare-table"><thead><tr><th>策略</th><th>参考预算</th><th>参考份额</th><th>测算依据</th></tr></thead><tbody id="compareBody"></tbody></table></div>
         <p id="detailFoot" class="detail-foot">参考预算仅供比较，非生效策略不会累计，也不会自动下单。</p>
 
-        <div class="chart-heading"><div><h3>历史价格与 B/S 点</h3><p id="chartRange">正在读取历史日 K</p></div><span id="chartCount" class="subtle-pill">—</span></div>
-        <div class="chart-legend"><span><i class="legend-price"></i>前复权价格</span><span><i class="legend-ma"></i><span id="maLegend">历史 MA</span></span><span><i class="legend-reference"></i>定投参考 B</span><span><i class="legend-buy"></i>成交 B</span><span><i class="legend-sell"></i>成交 S</span></div>
+        <div class="chart-heading"><div><h3 id="chartTitle">历史价格与 B/S 点</h3><p id="chartRange">正在读取历史日 K</p></div><span id="chartCount" class="subtle-pill">—</span></div>
+        <div class="chart-controls" aria-label="图表时间范围">
+          <div class="chart-periods" role="group" aria-label="显示区间">
+            <button class="chart-period active" type="button" data-chart-period="1y" aria-pressed="true">1 年</button>
+            <button class="chart-period" type="button" data-chart-period="3y" aria-pressed="false">3 年</button>
+            <button class="chart-period" type="button" data-chart-period="all" aria-pressed="false">全部</button>
+          </div>
+          <div class="chart-navigation">
+            <button id="chartPrevious" class="chart-nav-button" type="button" aria-label="查看更早的行情" title="查看更早的行情" disabled>‹</button>
+            <button id="chartNext" class="chart-nav-button" type="button" aria-label="查看更新的行情" title="查看更新的行情" disabled>›</button>
+          </div>
+        </div>
+        <div class="chart-legend"><span><i class="legend-price"></i>前复权价格</span><span><i class="legend-ma"></i><span id="maLegend">历史 MA</span></span><span id="referenceLegend"><i class="legend-reference"></i><span id="referenceLegendLabel">模拟 B</span></span><span><i class="legend-buy"></i>成交 B</span><span><i class="legend-sell"></i>成交 S</span></div>
         <div id="historyChart" class="chart-shell" role="img" aria-label="ETF 前复权历史价格、均线及买卖点"><div class="chart-empty">正在加载历史行情...</div></div>
-        <p id="chartNote" class="detail-foot">定投参考 B 仅标识回放日期；成交点来自真实账本。</p>
+        <div class="chart-scrubber"><span id="chartEarliest">—</span><input id="chartPosition" type="range" min="0" max="0" value="0" aria-label="移动图表时间窗口" disabled><span id="chartLatest">—</span></div>
+        <p id="chartNote" class="detail-foot">模拟 B 来自当前策略的历史回溯；成交点来自独立账本。</p>
 
         <section class="estimate-section" aria-label="历史收益估算">
           <div class="estimate-head"><div><h3>历史收益估算</h3><p id="estimateWindow">正在读取可回放区间</p></div><label for="estimateStart">起算日期<input id="estimateStart" type="date" disabled></label></div>
@@ -67,18 +95,18 @@
             <div class="metric"><span>估算盈亏</span><strong id="estimateProfit">—</strong><small>截至最新已完成日 K</small></div>
             <div class="metric"><span>投入收益率</span><strong id="estimateReturn">—</strong><small>相对累计买入金额</small></div>
           </div>
-          <p class="detail-foot">仅回放当前 MA 定投计划的历史买入，不包含卖出；按收盘价整手估算，未计手续费、滑点和税费，不等于实际账户收益或未来预测。</p>
+          <p id="estimateDisclosure" class="detail-foot">所选起算日从零模拟持仓，按历史收盘价整手买入；不模拟卖出、费用或滑点。实际成交独立显示，不参与收益计算；回溯结果不等于实际账户收益或未来预测。</p>
         </section>
 
         <div class="event-heading"><h3>回溯事件</h3><span id="eventCount" class="event-count">—</span></div>
-        <div class="table-scroll"><table class="event-table"><thead><tr><th>日期</th><th>标记</th><th>来源</th><th>价格</th><th>份额</th><th>依据 / 成交编号</th></tr></thead><tbody id="eventsBody"><tr><td colspan="6" class="empty-row">正在加载历史记录...</td></tr></tbody></table></div>
+        <div class="table-scroll event-table-scroll"><table class="event-table"><thead><tr><th>日期</th><th>标记</th><th>来源</th><th>价格</th><th>份额</th><th>依据 / 成交编号</th></tr></thead><tbody id="eventsBody"><tr><td colspan="6" class="empty-row">正在加载历史记录...</td></tr></tbody></table></div>
       </div>
     </section>
 
     <section id="historyPanel" class="tab-panel" hidden>
       <div class="section-title"><div><h2>运行记录</h2><p>每次刷新正式计划后会保存一份建议快照</p></div></div>
       <div class="table-scroll"><table><thead><tr><th>生成时间</th><th>建议预算</th><th>运行 ID</th></tr></thead><tbody id="historyBody"></tbody></table></div>
-      <div class="section-title record-title"><div><h2>成交账本</h2><p>仅显示手动登记的真实买卖，不包含建议</p></div></div>
+      <div class="section-title record-title"><div><h2>成交账本</h2><p>仅显示本地账本中的真实买卖，本页不录入成交</p></div></div>
       <div class="table-scroll"><table><thead><tr><th>成交日期</th><th>ETF 计划</th><th>方向</th><th>份额</th><th>价格</th><th>费用</th><th>成交编号</th></tr></thead><tbody id="fillsBody"></tbody></table></div>
     </section>
   </main>
@@ -90,15 +118,5 @@
     <div class="dialog-actions"><button id="donePlanDialog" class="outline-btn" type="button">关闭</button></div>
   </div></dialog>
 
-  <dialog id="tradeDialog" class="trade-dialog"><form id="tradeForm">
-    <div class="dialog-head"><div><h2>登记成交</h2><p>成交后录入，系统不会提交订单</p></div><button id="closeDialog" class="icon-btn" type="button" aria-label="关闭">×</button></div>
-    <label>ETF 计划<select name="plan_id" id="tradePlan" required></select></label>
-    <label>方向<select name="side" required><option value="buy">买入</option><option value="sell">卖出</option></select></label>
-    <div class="form-grid"><label>成交日期<input name="trade_date" id="tradeDate" type="date" required></label><label>份额<input name="shares" type="number" min="1" step="1" required></label></div>
-    <div class="form-grid"><label>成交价格<input name="price" type="number" min="0.000001" step="any" required></label><label>费用（元）<input name="fee" type="number" min="0" step="any" value="0" required></label></div>
-    <label>唯一成交编号<input name="fill_id" type="text" maxlength="120" autocomplete="off" required></label>
-    <p id="tradeError" class="form-error" hidden></p>
-    <div class="dialog-actions"><button id="cancelTrade" class="outline-btn" type="button">取消</button><button class="primary-btn" type="submit">保存成交</button></div>
-  </form></dialog>
 </body>
 </html>

@@ -37,8 +37,57 @@ def parse_history(rows: list) -> pd.Series:
     return frame.set_index("date")["close"].sort_index()
 
 
+def _fetch_daily_history(symbol: str, days: int, adjustment: str, as_of: date) -> list:
+    field = "qfqday" if adjustment else "day"
+    rows = []
+    # Tencent can append an extra live anchor bar when end is blank, making an
+    # 800-row qfq request return 801 rows. An explicit as-of date keeps qfq/raw
+    # pagination aligned while retaining strict response-size validation.
+    end = as_of.isoformat()
+    while len(rows) < days:
+        page_size = min(800, days - len(rows))
+        response = requests.get(
+            "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get",
+            params={"param": f"{symbol},day,,{end},{page_size},{adjustment}"}, timeout=20,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict) or payload.get("msg"):
+            raise DataError("ETF history provider returned an error")
+        data = payload.get("data")
+        market = data.get(symbol) if isinstance(data, dict) else None
+        if not isinstance(market, dict):
+            raise DataError("Invalid ETF history response")
+        page = market.get(field)
+        if page is None and adjustment and market.get("day") == []:
+            page = []
+        if not isinstance(page, list):
+            raise DataError("Missing ETF adjusted or raw history")
+        if not page:
+            if rows:
+                break
+            raise DataError("Empty ETF history")
+        if len(page) > page_size:
+            raise DataError("Invalid ETF history page")
+        parsed = parse_history(page)
+        page_dates = [stamp.date().isoformat() for stamp in parsed.index]
+        if [row[0] for row in page] != page_dates:
+            raise DataError("ETF history page is not ordered by date")
+        if rows and page_dates[-1] >= rows[0][0]:
+            raise DataError("ETF history pages overlap or are out of order")
+        if end and page_dates[-1] > end:
+            raise DataError("ETF history page exceeds requested end date")
+        rows = page + rows
+        if len(page) < page_size:
+            break
+        end = (parsed.index[0].date() - timedelta(days=1)).isoformat()
+    return rows
+
+
 def fetch_market(code: str, days: int, now: datetime, cache_dir: Path, force: bool = False) -> dict:
     """Keep dated snapshots; reuse only a complete snapshot from the last 5 minutes."""
+    if days < 1:
+        raise DataError("ETF history length must be positive")
     symbol = etf_symbol(code)
     folder = cache_dir / now.date().isoformat()
     if not force:
@@ -53,16 +102,12 @@ def fetch_market(code: str, days: int, now: datetime, cache_dir: Path, force: bo
 
     histories = {}
     for adjustment in ("qfq", ""):
-        response = requests.get(
-            "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get",
-            params={"param": f"{symbol},day,,,{days},{adjustment}"}, timeout=20,
-        )
-        response.raise_for_status()
-        data = response.json().get("data", {}).get(symbol, {})
         # A raw series must never silently stand in for adjusted prices.
-        rows = data.get("qfqday" if adjustment else "day")
-        histories["qfq" if adjustment else "raw"] = rows or []
-        parse_history(rows or [])
+        histories["qfq" if adjustment else "raw"] = _fetch_daily_history(
+            symbol, days, adjustment, now.date()
+        )
+    if [row[0] for row in histories["qfq"]] != [row[0] for row in histories["raw"]]:
+        raise DataError("Adjusted/raw ETF history dates disagree")
 
     response = requests.get(f"https://qt.gtimg.cn/q={symbol}", timeout=15)
     response.raise_for_status()

@@ -31,6 +31,10 @@ backtest_results/
 etf_plans.toml
 etf_valuations/
 dca_results/
+watchlist.json
+watchlist.json.bak
+portfolio.json
+portfolio.json.bak
 
 # 改表前的备份（stocks.xlsx.bak.<日期>），用于误删回滚，不入版本库
 stocks.xlsx.bak.*

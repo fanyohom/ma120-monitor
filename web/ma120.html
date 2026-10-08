@@ -18,11 +18,12 @@
   <main class="layout">
     <div id="stockNotice" class="notice" hidden></div>
     <p id="stockRefreshFeedback" class="refresh-feedback" role="status" hidden></p>
-    <div class="page-head"><div><div class="eyebrow">MARKET MONITOR</div><h1>MA120 监控</h1><p id="stockUpdated" class="muted">正在读取数据</p></div></div>
+    <div id="stockOverview">
+    <div class="page-head"><div><div class="eyebrow">MARKET MONITOR</div><h1>MA120 监控</h1><p id="stockUpdated" class="muted">正在读取数据</p></div><div class="head-actions"><button id="watchlistManage" class="outline-btn" type="button">管理关注池</button></div></div>
 
     <section class="metrics" aria-label="股票监控摘要">
-      <div class="metric"><span>持仓股票</span><strong id="portfolioCount">—</strong><small>来自 portfolio 工作表</small></div>
-      <div class="metric"><span>关注股票</span><strong id="watchlistCount">—</strong><small>来自 watchlist 工作表</small></div>
+      <div class="metric"><span>持仓股票</span><strong id="portfolioCount">—</strong><small>来自 portfolio.json</small></div>
+      <div class="metric"><span>关注股票</span><strong id="watchlistCount">—</strong><small>来自 watchlist.json</small></div>
       <div class="metric"><span>今日买入信号</span><strong id="buySignals">—</strong><small>首次跌破买入线</small></div>
       <div class="metric"><span>今日卖出信号</span><strong id="sellSignals">—</strong><small>首次突破卖出线</small></div>
     </section>
@@ -35,13 +36,53 @@
         <button class="tab" type="button" data-scope="portfolio" role="tab" aria-selected="false">持仓</button>
         <button class="tab" type="button" data-scope="watchlist" role="tab" aria-selected="false">关注池</button>
       </div>
-      <div class="stock-controls"><label class="sr-only" for="stockSearch">搜索股票</label><input id="stockSearch" type="search" placeholder="搜索名称或代码"><label class="sr-only" for="stockFilter">状态筛选</label><select id="stockFilter"><option value="all">全部状态</option><option value="buy">今日买入信号</option><option value="sell">今日卖出信号</option><option value="below_buy">低于买入线</option><option value="above_sell">高于卖出线</option><option value="between">区间内</option><option value="unavailable">数据待补</option></select></div>
+      <div class="stock-controls"><label class="sr-only" for="stockSearch">搜索股票</label><input id="stockSearch" type="search" placeholder="搜索名称或代码"><label class="sr-only" for="stockFilter">状态筛选</label><select id="stockFilter"><option value="all">全部状态</option><option value="buy">今日买入信号</option><option value="sell">今日卖出信号</option><option value="below_buy">低于买入线</option><option value="above_sell">高于卖出线</option><option value="between">区间内</option><option value="unavailable">数据待补</option></select><label class="sr-only" for="stockSort">排序方式</label><select id="stockSort"><option value="signal">状态 · 信号优先</option><option value="buy">状态 · 买入优先</option><option value="sell">状态 · 卖出优先</option><option value="code">代码顺序</option></select></div>
     </div>
 
     <div class="section-title stock-list-head"><div><h2>监控清单</h2><p id="stockCountLabel">等待行情</p></div><span class="subtle-pill">MA120 × 0.88 / 1.12</span></div>
     <div class="table-scroll"><table class="stock-table"><thead><tr><th>股票 / 分类</th><th>现价</th><th>MA120</th><th>偏离 MA</th><th>买入线</th><th>卖出线</th><th>状态</th><th>持仓浮盈亏</th><th></th></tr></thead><tbody id="stockRows"><tr><td class="empty-row" colspan="9">正在读取清单...</td></tr></tbody></table></div>
+    <nav class="stock-pagination" aria-label="监控清单分页">
+      <label for="stockPageSize">每页 <select id="stockPageSize"><option value="10">10</option><option value="20">20</option><option value="50">50</option></select> 只</label>
+      <div class="stock-page-nav"><span id="stockPageInfo" aria-live="polite">—</span><button id="stockPrevPage" class="stock-page-button" type="button" aria-label="上一页" title="上一页" disabled>←</button><button id="stockNextPage" class="stock-page-button" type="button" aria-label="下一页" title="下一页" disabled>→</button></div>
+    </nav>
+    </div>
+
+    <section id="stockDetail" class="stock-detail" aria-label="MA120 股票历史回溯" hidden>
+      <div class="detail-nav"><a id="stockBack" class="back-btn" href="/ma120">← 全部股票</a><span>股票详情</span></div>
+      <div class="section-title stock-detail-head"><div><div class="eyebrow">MA120 DETAIL</div><h1 id="stockDetailName">—</h1><p id="stockDetailCode" class="muted">—</p></div><span id="stockDetailStatus" class="stock-status">—</span></div>
+      <div class="stock-live-label"><strong>当前行情与信号</strong><span id="stockDetailSource">—</span></div>
+      <div class="stock-detail-numbers"><div><span>现价</span><strong id="stockDetailPrice">—</strong></div><div><span>MA120</span><strong id="stockDetailMa">—</strong></div><div><span>偏离 MA120</span><strong id="stockDetailDeviation">—</strong></div><div><span>买入线</span><strong id="stockDetailBuy">—</strong></div><div><span>卖出线</span><strong id="stockDetailSell">—</strong></div></div>
+      <p id="stockDetailError" class="stock-detail-error" hidden></p>
+      <div class="stock-detail-extra"><div><span>持仓份额</span><strong id="stockDetailShares">—</strong></div><div><span>持仓成本</span><strong id="stockDetailBasis">—</strong></div><div><span>浮动盈亏</span><strong id="stockDetailPnl">—</strong></div></div>
+
+      <div class="chart-heading"><div><h2>历史价格与模拟 B/S 点</h2><p id="stockHistoryRange">正在读取历史日 K</p></div><span id="stockHistoryCount" class="subtle-pill">—</span></div>
+      <div class="chart-legend stock-chart-legend"><span><i class="legend-price"></i>收盘价</span><span><i class="legend-ma"></i>MA120</span><span><i class="legend-buy-line"></i>买入线 0.88×MA</span><span><i class="legend-sell-line"></i>卖出线 1.12×MA</span><span><i class="legend-buy"></i>模拟 B</span><span><i class="legend-sell"></i>模拟 S</span></div>
+      <div id="stockHistoryChart" class="chart-shell stock-chart-shell" role="img" aria-label="MA120 历史收盘价、均线、阈值和模拟买卖点"><div class="chart-empty">正在加载历史日 K...</div></div>
+      <p class="detail-foot stock-history-note">按已完成日 K 收盘价模拟首次穿越买入线或卖出线的参考 B/S 点；均线包含当日收盘价。B/S 独立记录穿越，不模拟持仓，所以 S 可能早于 B。标记不代表当日收盘可成交，也不是实际交易记录。当前行情信号请看上方。</p>
+      <section class="stock-estimate" aria-labelledby="stockEstimateTitle">
+        <div class="stock-estimate-head"><div><h2 id="stockEstimateTitle">历史收益测算</h2><p>从选定日期空仓开始，按 B/S 信号模拟下一交易日收盘成交</p></div><form id="stockEstimateForm"><label for="stockEstimateDate">起算日期</label><input id="stockEstimateDate" type="date" required><button class="outline-btn" type="submit">测算</button></form></div>
+        <p id="stockEstimateMessage" class="stock-estimate-message" role="status">正在读取历史日 K...</p>
+        <div id="stockEstimateMetrics" class="stock-estimate-metrics" hidden><div><span>起始资金</span><strong id="stockEstimateCapital">—</strong></div><div><span>期末资产</span><strong id="stockEstimateValue">—</strong></div><div><span>模拟收益</span><strong id="stockEstimateProfit">—</strong></div><div><span>收益率</span><strong id="stockEstimateReturn">—</strong></div><div><span>期末状态</span><strong id="stockEstimatePosition">—</strong></div></div>
+        <p class="detail-foot stock-estimate-note">图中 B/S 是独立的穿越标记；收益测算只执行空仓时的 B 和持仓时的 S。这是从零仓位开始的假设交易，不读取真实持仓成本和份额。按历史日 K 收盘价和可买卖零碎股数计算，未计手续费、滑点、整手限制或现金分红；收益并非实际成交结果。</p>
+        <div class="stock-estimate-trades"><div class="event-heading"><h3>模拟成交</h3><span id="stockEstimateTradeCount" class="event-count">—</span></div><div class="table-scroll"><table class="stock-event-table"><thead><tr><th>信号日</th><th>模拟成交日</th><th>方向</th><th>收盘价</th><th>股数</th></tr></thead><tbody id="stockEstimateTrades"><tr><td class="empty-row" colspan="5">选择起算日期后查看模拟成交</td></tr></tbody></table></div></div>
+      </section>
+      <div class="event-heading"><h2>历史模拟事件</h2><span id="stockEventCount" class="event-count">—</span></div>
+      <div class="table-scroll"><table class="stock-event-table"><thead><tr><th>日期</th><th>方向</th><th>收盘价</th><th>MA120</th><th>触发线</th><th>说明</th></tr></thead><tbody id="stockEvents"><tr><td class="empty-row" colspan="6">正在加载模拟事件...</td></tr></tbody></table></div>
+    </section>
   </main>
 
-  <dialog id="stockDialog" class="stock-dialog"><div class="stock-dialog-inner"><div class="dialog-head"><div><div class="eyebrow">MA120 DETAIL</div><h2 id="stockDetailName">—</h2><p id="stockDetailCode">—</p></div><button id="stockDialogClose" class="icon-btn" type="button" aria-label="关闭">×</button></div><span id="stockDetailStatus" class="status">—</span><div class="stock-detail-numbers"><div><span>现价</span><strong id="stockDetailPrice">—</strong></div><div><span>MA120</span><strong id="stockDetailMa">—</strong></div><div><span>偏离 MA120</span><strong id="stockDetailDeviation">—</strong></div></div><div class="stock-range"><div class="stock-range-labels"><span id="stockDetailBuy">—</span><span id="stockDetailSell">—</span></div><div class="stock-range-track"><span id="stockCurrentMarker" class="stock-current-marker"></span></div><div class="stock-range-labels"><span>买入线</span><span>卖出线</span></div></div><div class="stock-detail-extra"><div><span>持仓份额</span><strong id="stockDetailShares">—</strong></div><div><span>持仓成本</span><strong id="stockDetailBasis">—</strong></div><div><span>浮动盈亏</span><strong id="stockDetailPnl">—</strong></div><div><span>行情来源</span><strong id="stockDetailSource">—</strong></div></div><p id="stockDetailError" class="stock-detail-error" hidden></p></div></dialog>
+  <dialog id="watchlistDialog" class="watchlist-dialog" aria-labelledby="watchlistTitle">
+    <div class="watchlist-dialog-inner">
+      <div class="dialog-head"><div><h2 id="watchlistTitle">管理关注池</h2><p>仅管理关注股票；持仓信息保存在 portfolio.json。</p></div><button id="watchlistClose" class="icon-btn" type="button" aria-label="关闭关注池管理">×</button></div>
+      <form id="watchlistAdd" class="watchlist-add">
+        <label>股票代码<input id="watchlistCode" name="code" autocomplete="off" inputmode="text" placeholder="如 600519" required maxlength="8"></label>
+        <label>股票名称<input id="watchlistName" name="name" autocomplete="off" placeholder="如 贵州茅台" required maxlength="40"></label>
+        <button class="primary-btn" type="submit">添加</button>
+      </form>
+      <p id="watchlistFeedback" class="watchlist-feedback" role="status" aria-live="polite" hidden></p>
+      <div class="watchlist-list-head"><strong>当前关注池</strong><span id="watchlistEditorCount">—</span></div>
+      <div id="watchlistItems" class="watchlist-items" aria-label="关注股票列表"></div>
+    </div>
+  </dialog>
 </body>
 </html>
