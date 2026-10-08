@@ -1,9 +1,9 @@
 """
 MA120 持仓 & 关注池监控（Sina 数据源）
 
-数据：从 stocks.xlsx 读取（两个 sheet）
-  - sheet "portfolio": 持仓 股票代码/股票名称/成本价/持仓数量 → 浮盈浮亏 + MA120 信号
-  - sheet "watchlist": 关注池 股票代码/股票名称                  → 仅 MA120 信号
+数据：
+  - portfolio.json：持仓、成本价、持仓数量
+  - watchlist.json：关注池股票代码和名称
 
 策略：
   - 买入线：MA120 × 0.88
@@ -29,6 +29,8 @@ from datetime import datetime
 
 import pandas as pd
 import requests
+from portfolio_store import PortfolioError, read_portfolio
+from watchlist_store import read_watchlist
 
 warnings.filterwarnings("ignore")
 
@@ -44,6 +46,8 @@ CACHE_DIR = os.path.join(BASE_DIR, ".stock_cache")
 CACHE_DAYS = 1
 
 STOCKS_FILE = os.path.join(BASE_DIR, "stocks.xlsx")
+PORTFOLIO_JSON = os.path.join(BASE_DIR, "portfolio.json")
+WATCHLIST_JSON = os.path.join(BASE_DIR, "watchlist.json")
 PORTFOLIO_SHEET = "portfolio"
 WATCHLIST_SHEET = "watchlist"
 
@@ -112,7 +116,7 @@ def _tencent_symbol(stock_code: str) -> str:
 
 
 def _read_xlsx_rows(path: str, sheet: str) -> list:
-    """读取 xlsx 指定 sheet，跳过空行和 # 注释行。"""
+    """Read legacy workbook rows for one-time migration scripts only."""
     df = pd.read_excel(path, sheet_name=sheet, dtype=str, engine="openpyxl")
     df.columns = [str(c).strip() for c in df.columns]
     rows = []
@@ -130,43 +134,11 @@ def _read_xlsx_rows(path: str, sheet: str) -> list:
 
 
 def load_portfolio() -> list:
-    if not os.path.exists(STOCKS_FILE):
-        print(f"⚠️ 未找到数据文件: {STOCKS_FILE}")
-        return []
-    try:
-        rows = _read_xlsx_rows(STOCKS_FILE, PORTFOLIO_SHEET)
-        out = []
-        for item in rows:
-            if not item.get("code") or not item.get("name"):
-                continue
-            out.append(
-                {
-                    "code": item["code"],
-                    "name": item["name"],
-                    "cost": _safe_float(item.get("cost")),
-                    "shares": _safe_float(item.get("shares")),
-                }
-            )
-        return out
-    except Exception as exc:
-        print(f"⚠️ 读取 {os.path.basename(STOCKS_FILE)}[{PORTFOLIO_SHEET}] 失败: {exc}")
-        return []
+    return read_portfolio(PORTFOLIO_JSON)
 
 
 def load_watchlist() -> list:
-    if not os.path.exists(STOCKS_FILE):
-        return []
-    try:
-        rows = _read_xlsx_rows(STOCKS_FILE, WATCHLIST_SHEET)
-        out = []
-        for item in rows:
-            if not item.get("code") or not item.get("name"):
-                continue
-            out.append({"code": item["code"], "name": item["name"]})
-        return out
-    except Exception as exc:
-        print(f"⚠️ 读取 {os.path.basename(STOCKS_FILE)}[{WATCHLIST_SHEET}] 失败: {exc}")
-        return []
+    return read_watchlist(WATCHLIST_JSON)
 
 
 # ---------- K 线获取 ----------
@@ -216,8 +188,10 @@ def _write_cache(code: str, df: pd.DataFrame) -> None:
 def get_stock_hist_data(stock_code: str, days: int = DATA_DAYS) -> pd.DataFrame:
     """获取前复权日 K：A 股使用新浪，港股使用腾讯。"""
     cached = _read_cache(stock_code)
-    if cached is not None and len(cached) >= MA_LONG:
+    required_rows = MA_LONG if days <= DATA_DAYS else days
+    if cached is not None and len(cached) >= required_rows:
         return cached
+    fallback = cached if cached is not None and len(cached) >= MA_LONG else pd.DataFrame()
 
     try:
         if _is_hk_code(stock_code):
@@ -230,7 +204,7 @@ def get_stock_hist_data(stock_code: str, days: int = DATA_DAYS) -> pd.DataFrame:
             market_data = payload.get("data", {}).get(symbol, {})
             data = market_data.get("qfqday") or market_data.get("day") or []
             if not data:
-                return pd.DataFrame()
+                return fallback
 
             df = pd.DataFrame(
                 [row[:6] for row in data],
@@ -240,6 +214,8 @@ def get_stock_hist_data(stock_code: str, days: int = DATA_DAYS) -> pd.DataFrame:
             df = df.set_index("date").sort_index()
             for col in ["open", "high", "low", "close", "volume"]:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
+            if len(df) < len(fallback):
+                return fallback
             _write_cache(stock_code, df)
             return df
 
@@ -249,17 +225,19 @@ def get_stock_hist_data(stock_code: str, days: int = DATA_DAYS) -> pd.DataFrame:
         response = requests.get(url, params=params, timeout=15)
         data = response.json()
         if not data:
-            return pd.DataFrame()
+            return fallback
         df = pd.DataFrame(data)
         df = df.rename(columns={"day": "date", "vol": "volume"})
         df["date"] = pd.to_datetime(df["date"])
         df = df.set_index("date").sort_index()
         for col in ["open", "high", "low", "close", "volume"]:
             df[col] = pd.to_numeric(df[col], errors="coerce")
+        if len(df) < len(fallback):
+            return fallback
         _write_cache(stock_code, df)
         return df
     except Exception:
-        return pd.DataFrame()
+        return fallback
 
 
 # ---------- MA120 信号 ----------
@@ -932,4 +910,8 @@ if __name__ == "__main__":
         mode = "watchlist"
     feishu = "--no-feishu" not in args
     skip_non_trading_day = "--skip-non-trading-day" in args
-    run(mode=mode, feishu=feishu, skip_non_trading_day=skip_non_trading_day)
+    try:
+        run(mode=mode, feishu=feishu, skip_non_trading_day=skip_non_trading_day)
+    except PortfolioError as exc:
+        print(f"持仓读取失败：{exc}", file=sys.stderr)
+        sys.exit(1)

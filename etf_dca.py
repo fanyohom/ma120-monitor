@@ -72,6 +72,8 @@ def load_config(path: Path) -> dict:
         codes.add(plan["code"])
         if plan["strategy"] not in STRATEGIES:
             raise ValueError(f"Unknown strategy: {plan['strategy']}")
+        if not isinstance(plan.get("strategy_reason", ""), str):
+            raise ValueError("strategy_reason must be text")
         number(plan["base_amount"], "base_amount", 0.01)
         number(plan["max_amount"], "max_amount", 0.01)
         number(plan.get("cost", 0), "cost")

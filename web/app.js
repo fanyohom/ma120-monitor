@@ -9,6 +9,7 @@ let activeTab = 'plans';
 let currentEstimate = null;
 const historyCache = new Map();
 const estimateCache = new Map();
+const chartViews = new Map();
 
 function routePlanId() {
   const match = location.pathname.match(/^\/etf\/([a-zA-Z0-9_-]+)$/);
@@ -47,6 +48,7 @@ function navigate(planId) {
   applyRoute();
   renderPlans();
   renderDetail();
+  renderTradeAlerts();
   window.scrollTo(0, 0);
 }
 
@@ -118,7 +120,18 @@ function renderPlans() {
     strategyName.className = 'strategy-tag';
     strategyName.textContent = data.strategies[plan.strategy];
     strategyCell.append(strategyName);
-    if (active?.market?.ma != null) {
+    if (plan.strategy_reason) {
+      const reason = document.createElement('span');
+      reason.className = 'plan-strategy-reason';
+      reason.textContent = plan.strategy_reason;
+      strategyCell.append(reason);
+    }
+    if (plan.strategy === 'valuation' && active?.valuation) {
+      const valuationValue = document.createElement('span');
+      valuationValue.className = 'strategy-sub';
+      valuationValue.textContent = `PE ${Number(active.valuation.pe_ttm).toFixed(2)} · 分位 ${Number(active.valuation.percentile).toFixed(2)}%`;
+      strategyCell.append(valuationValue);
+    } else if (plan.strategy === 'ma' && active?.market?.ma != null) {
       const maValue = document.createElement('span');
       maValue.className = 'strategy-sub';
       maValue.textContent = `MA${active.market.ma_days} ${Number(active.market.ma).toFixed(3)}`;
@@ -161,15 +174,93 @@ function renderDefinition(plan) {
   }
 }
 
+function strategyDescriptions() {
+  const settings = data.strategy_settings;
+  const maDays = settings.ma_days;
+  const low = settings.buy_below;
+  const high = settings.high_at;
+  return [
+    {key:'valuation', title:'估值定投', basis:'比较跟踪指数 PE-TTM 在自身历史中的分位', action:`低于 ${low}% 分位投入；${low}% 至低于 ${high}% 暂停；达到 ${high}% 后高估观察，不自动卖出。`, note:'需真实指数 PE 历史；分位不是 PE 倍数。'},
+    {key:'ma', title:'均线定投', basis:`比较场内价格与此前 ${maDays} 个已完成交易日的 MA${maDays}`, action:'低于均线时按偏离档位多投，高于时少投；调节的是每期金额，不是触线即买卖。', note:'比较口径：现价 / 均线 − 1'},
+    {key:'drawdown', title:'涨跌幅定投', basis:'比较当前价格与持仓平均成本', action:'浮亏按档多投、浮盈按档少投；没有持仓时首期按基础金额。', note:'历史回溯从零持仓起算，后续用模拟买入的平均成本；不是单日涨跌。'},
+  ];
+}
+
+function renderStrategyGuide() {
+  const container = $('strategyGuideMethods');
+  container.replaceChildren();
+  for (const strategy of strategyDescriptions()) {
+    const count = data.plans.filter((plan) => plan.strategy === strategy.key).length;
+    const method = document.createElement('div');
+    method.className = `strategy-method${count ? ' active' : ''}`;
+    const heading = document.createElement('div');
+    heading.className = 'strategy-method-head';
+    const name = document.createElement('h3');
+    name.textContent = strategy.title;
+    const state = document.createElement('span');
+    state.textContent = count ? `${count} 只生效` : '备选对比';
+    heading.append(name, state);
+    const basis = document.createElement('p');
+    basis.className = 'strategy-basis';
+    basis.textContent = strategy.basis;
+    const action = document.createElement('p');
+    action.className = 'strategy-action';
+    action.textContent = strategy.action;
+    const note = document.createElement('small');
+    note.textContent = strategy.note;
+    method.append(heading, basis, action, note);
+    container.append(method);
+  }
+  $('strategyGuideNote').textContent = data.sample && data.plans.every((plan) => plan.strategy === 'ma')
+    ? `${data.plans.length} 只示例 ETF 当前均选用 MA${data.strategy_settings.ma_days}；其余方法只供比较，不叠加预算。`
+    : '每只 ETF 只由选中的一种策略计入本期预算；其余方法仅供比较。';
+}
+
+function renderDetailStrategy(plan, active) {
+  const strategy = strategyDescriptions().find((item) => item.key === plan.strategy);
+  const container = $('detailStrategyLead');
+  container.replaceChildren();
+  const title = document.createElement('strong');
+  title.textContent = `当前生效 · ${strategy.title}`;
+  const summary = document.createElement('span');
+  summary.textContent = `${strategy.basis}。${strategy.action}`;
+  container.append(title, summary);
+  if (plan.strategy_reason) {
+    const reason = document.createElement('p');
+    reason.className = 'detail-strategy-reason';
+    reason.textContent = `选用原因：${plan.strategy_reason}`;
+    container.append(reason);
+  }
+  if (plan.strategy === 'valuation' && active?.status === 'blocked' && !active.valuation) {
+    const warning = document.createElement('small');
+    warning.textContent = '当前缺少有效指数 PE 历史，本期不会生成估值买入预算。';
+    container.append(warning);
+  }
+}
+
+function renderValuationSnapshot(plan, active) {
+  const snapshot = $('valuationSnapshot');
+  snapshot.hidden = plan.strategy !== 'valuation';
+  if (snapshot.hidden) return;
+  const valuation = active?.valuation;
+  $('valuationPe').textContent = valuation ? Number(valuation.pe_ttm).toFixed(2) : '—';
+  $('valuationPercentile').textContent = valuation ? `${Number(valuation.percentile).toFixed(2)}%` : '—';
+  $('valuationDate').textContent = valuation?.date || '—';
+  $('valuationWindow').textContent = valuation
+    ? `按 ${valuation.start_date} 至 ${valuation.date} 的 ${quantity(valuation.samples)} 条指数估值计算历史分位；指数 PE 与 ETF 场内价格不是同一指标。`
+    : '刷新数据后查看指数估值；缺少有效数据时不会产生估值买入提示。';
+}
+
 function renderDetail() {
   if (!document.body.classList.contains('detail-mode')) { $('detail').hidden = true; return; }
   const plan = data.plans.find((item) => item.id === selectedId);
   if (!plan) { $('detail').hidden = true; return; }
   $('detail').hidden = false;
-  $('detailTradeBtn').disabled = data.sample;
   const rows = (data.report?.rows || []).filter((row) => row.plan_id === plan.id);
   const active = rows.find((row) => row.selected);
   $('detailName').textContent = `${plan.name} · ${plan.code}`;
+  renderDetailStrategy(plan, active);
+  renderValuationSnapshot(plan, active);
   renderDefinition(plan);
   const frequency = {daily:'每日', weekly:'每周', monthly:'每月'}[plan.frequency];
   $('detailMeta').textContent = `${frequency} · 基础金额 ${money(plan.base_amount)} · 单期上限 ${money(plan.max_amount)}`;
@@ -180,7 +271,13 @@ function renderDetail() {
   $('detailCost').textContent = active?.holdings ? `平均成本 ${money(active.cost)}` : '尚无持仓记录';
   $('detailReference').textContent = active ? money(active.reference_amount) : '—';
   $('detailShares').textContent = active ? `参考 ${quantity(active.reference_shares)} 份` : '刷新后查看';
-  $('maLegend').textContent = active?.market?.ma_days ? `前复权 MA${active.market.ma_days}` : '前复权 MA';
+  const maLabel = active?.market?.ma_days ? `MA${active.market.ma_days}` : 'MA';
+  $('maLegend').textContent = `前复权 ${maLabel}${plan.strategy === 'ma' ? '' : '（对照）'}`;
+  $('referenceLegend').hidden = false;
+  $('referenceLegendLabel').textContent = `${data.strategies[plan.strategy]}模拟 B`;
+  $('chartTitle').textContent = `${data.strategies[plan.strategy]} · 历史价格与 B/S 点`;
+  $('historyChart').setAttribute('aria-label', `${plan.name}前复权历史价格、${data.strategies[plan.strategy]}模拟买入与实际成交点`);
+  $('estimateDisclosure').textContent = '所选起算日从零模拟持仓，按历史收盘价整手买入；不模拟卖出、手续费、税费或滑点。实际成交独立显示，不参与收益计算；回溯结果不等于实际账户收益或未来预测。';
   const body = $('compareBody');
   body.replaceChildren();
   for (const row of rows) {
@@ -192,7 +289,7 @@ function renderDetail() {
     cell(tr, reasonText(row.reason));
     body.append(tr);
   }
-  if (!rows.length) emptyRow(body, 4, '刷新行情后查看策略测算');
+  if (!rows.length) emptyRow(body, 4, '刷新数据后查看策略测算');
   loadPlanHistory(plan.id);
 }
 
@@ -315,11 +412,23 @@ function drawChart(history) {
     tooltipField(`MA${history.ma_days}`, point.chart_ma == null ? '—' : `¥${point.chart_ma.toFixed(3)}`);
     const deviation = point.chart_ma == null ? null : (point.chart_price / point.chart_ma - 1) * 100;
     tooltipField('偏离均线', deviation == null ? '—' : `${deviation >= 0 ? '+' : ''}${deviation.toFixed(2)}%`);
+    if (point.valuation) {
+      tooltipField('可用估值日期', point.valuation.date);
+      tooltipField('指数 PE-TTM', Number(point.valuation.pe_ttm).toFixed(2));
+      tooltipField('历史估值分位', `${Number(point.valuation.percentile).toFixed(2)}%`);
+    } else if (point.valuation_error) {
+      tooltipField('估值数据', reasonText(point.valuation_error));
+    }
     const prior = points[index - 1];
     const daily = prior ? (point.chart_price / prior.chart_price - 1) * 100 : null;
     tooltipField('当日涨跌', daily == null ? '—' : `${daily >= 0 ? '+' : ''}${daily.toFixed(2)}%`);
     const reference = history.reference_buys.find((buy) => buy.date === point.date);
-    if (reference) tooltipField('定投参考 B', `${money(reference.amount)} · ${quantity(reference.shares)} 份`);
+    if (reference) {
+      tooltipField('模拟 B', `${money(reference.amount)} · ${quantity(reference.shares)} 份`);
+      if (data.plans.find((plan) => plan.id === selectedId)?.strategy === 'drawdown') {
+        tooltipField('模拟持仓依据', reference.reason);
+      }
+    }
     for (const trade of history.trades.filter((fill) => fill.date === point.date && fill.on_chart)) {
       tooltipField(`成交 ${trade.side === 'buy' ? 'B' : 'S'}`, `¥${trade.price.toFixed(3)} · ${quantity(trade.shares)} 份`);
     }
@@ -367,27 +476,77 @@ function displayedHistory(history) {
   return history;
 }
 
+function chartWindow(history) {
+  const total = history.series.length;
+  const view = chartViews.get(selectedId) || {mode:'1y', end:total};
+  const size = Math.min(total, view.mode === 'all' ? total : view.mode === '3y' ? 720 : 240);
+  const start = Math.max(0, Math.min(total - size, view.end - size));
+  const end = start + size;
+  chartViews.set(selectedId, {...view, end});
+  return {start, end, size, total, mode:view.mode};
+}
+
+function renderChartControls(history, window) {
+  document.querySelectorAll('[data-chart-period]').forEach((button) => {
+    const active = button.dataset.chartPeriod === window.mode;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-pressed', String(active));
+  });
+  $('chartPrevious').disabled = window.start === 0;
+  $('chartNext').disabled = window.end === window.total;
+  const slider = $('chartPosition');
+  slider.max = String(window.total - window.size);
+  slider.value = String(window.start);
+  slider.disabled = window.total <= window.size;
+  const first = history.series[window.start]?.date || '';
+  const last = history.series[window.end - 1]?.date || '';
+  slider.setAttribute('aria-valuetext', `${first} 至 ${last}`);
+  $('chartEarliest').textContent = history.series[0]?.date.slice(0, 7) || '—';
+  $('chartLatest').textContent = history.series.at(-1)?.date.slice(0, 7) || '—';
+}
+
+function renderPlanChart(history) {
+  const shown = displayedHistory(history);
+  const window = chartWindow(history);
+  renderChartControls(history, window);
+  const visibleSeries = shown.series.slice(window.start, window.end);
+  const firstDate = visibleSeries[0]?.date;
+  const lastDate = visibleSeries.at(-1)?.date;
+  const visibleDates = new Set(visibleSeries.map((point) => point.date));
+  const visibleBuys = shown.reference_buys.filter((point) => visibleDates.has(point.date));
+  const visibleTrades = history.trades.filter((trade) => visibleDates.has(trade.date));
+  const chartHistory = {...shown, series:visibleSeries, reference_buys:visibleBuys,
+                        trades:visibleTrades.map((trade) => ({...trade, on_chart:true}))};
+  $('chartRange').textContent = firstDate ? `${firstDate} 至 ${lastDate} · 已完成日 K` : '暂无历史日 K';
+  const buys = visibleTrades.filter((trade) => trade.side === 'buy').length;
+  const sells = visibleTrades.filter((trade) => trade.side === 'sell').length;
+  const plan = data.plans.find((item) => item.id === selectedId);
+  const strategyName = data.strategies[plan.strategy];
+  $('chartCount').textContent = `${history.replay_supported ? `模拟 B ${visibleBuys.length} · ` : ''}成交 B ${buys} / S ${sells}`;
+  if (history.replay_supported) {
+    $('chartNote').textContent = `图中价格和 MA${history.ma_days} 均为前复权并换算到最新价格尺度；MA 仅在均线策略中参与判断。模拟 B 按${strategyName}和所选起算日回放，从零持仓开始；成交 B/S 来自独立账本，实际成交价以事件表为准。`;
+  } else {
+    $('chartNote').textContent = `图中价格和 MA${history.ma_days} 均为前复权并换算到最新价格尺度；${reasonText(history.replay_reason || '当前没有可用的历史回放数据')}。仅标记已登记的成交 B/S，实际成交价以事件表为准。`;
+  }
+  $('referenceLegend').hidden = !history.replay_supported;
+  drawChart(chartHistory);
+}
+
 function renderPlanHistory(history) {
   const shown = displayedHistory(history);
-  $('chartRange').textContent = `${history.window_start} 至 ${history.window_end} · 已完成日 K`;
-  const buys = history.trades.filter((trade) => trade.side === 'buy').length;
-  const sells = history.trades.filter((trade) => trade.side === 'sell').length;
-  $('chartCount').textContent = `定投参考 B ${shown.reference_buys.length} · 成交 B ${buys} / S ${sells}`;
-  if (history.replay_supported) {
-    $('chartNote').textContent = `图中价格和 MA${history.ma_days} 均为前复权并换算到最新价格尺度；每个历史日的均线只用之前 ${history.ma_days} 根已完成日 K。定投参考 B 未计费用或真实持仓；成交点按日期落在前复权收盘线，实际成交价以事件表为准。`;
-  } else {
-    $('chartNote').textContent = '图中价格和均线均为前复权并换算到最新价格尺度。当前策略没有可验证的定投参考 B；仅标记已登记的成交 B/S，实际成交价以事件表为准。';
-  }
-  drawChart(shown);
+  const plan = data.plans.find((item) => item.id === selectedId);
+  const strategyName = data.strategies[plan.strategy];
+  const historyDates = new Set(history.series.map((point) => point.date));
+  renderPlanChart(history);
   const events = [
-    ...shown.reference_buys.map((point) => ({date:point.date, type:'定投参考 B', source:'MA 回放', price:point.price, shares:point.shares, detail:point.reason})),
+    ...shown.reference_buys.map((point) => ({date:point.date, type:'模拟 B', source:`${strategyName}回放`, price:point.price, shares:point.shares, detail:point.reason})),
     ...history.trades.map((trade) => ({date:trade.date, type:trade.side === 'buy' ? '成交 B' : '成交 S', source:'成交账本', price:trade.price,
-      shares:trade.shares, detail:`${trade.fill_id}${trade.on_chart ? '' : ' · 图表范围外'}`})),
+      shares:trade.shares, detail:`${trade.fill_id}${historyDates.has(trade.date) ? '' : ' · 行情覆盖外'}`})),
   ].sort((a, b) => b.date.localeCompare(a.date) || a.type.localeCompare(b.type));
   $('eventCount').textContent = `${events.length} 条`;
   const body = $('eventsBody');
   body.replaceChildren();
-  for (const event of events.slice(0, 40)) {
+  for (const event of events) {
     const tr = document.createElement('tr');
     cell(tr, event.date);
     cell(tr, event.type, event.type.endsWith('S') ? 'event-sell' : 'event-buy');
@@ -397,7 +556,7 @@ function renderPlanHistory(history) {
     cell(tr, event.detail);
     body.append(tr);
   }
-  if (!events.length) emptyRow(body, 6, '当前窗口没有买卖事件');
+  if (!events.length) emptyRow(body, 6, '完整回溯区间没有买卖事件');
 }
 
 function renderEstimate(result) {
@@ -410,8 +569,8 @@ function renderEstimate(result) {
   $('estimateMessage').textContent = '所选区间内没有可买整手的计划日';
   $('estimateInvested').textContent = money(result.invested);
   $('estimateValue').textContent = money(result.estimated_value);
-  $('estimateProfit').textContent = signedMoney(result.profit);
-  $('estimateProfit').className = result.profit >= 0 ? 'positive' : 'negative';
+  $('estimateProfit').textContent = result.buy_count ? signedMoney(result.profit) : '—';
+  $('estimateProfit').className = result.buy_count ? result.profit >= 0 ? 'positive' : 'negative' : '';
   $('estimateReturn').textContent = result.return_pct == null ? '—' : `${result.return_pct >= 0 ? '+' : ''}${result.return_pct.toFixed(2)}%`;
   $('estimateReturn').className = result.return_pct == null ? '' : result.return_pct >= 0 ? 'positive' : 'negative';
   $('estimateBuys').textContent = `${result.buy_count} 次整手买入`;
@@ -444,13 +603,14 @@ function prepareEstimate(planId, history) {
     input.disabled = true;
     input.value = '';
     $('estimateWindow').textContent = '当前策略暂无可回放的收益区间';
-    renderEstimate({supported:false, reason:'当前仅支持 MA 定投的历史收益估算'});
+    renderEstimate({supported:false, reason:reasonText(history.replay_reason || '没有可用的历史回放数据')});
     return;
   }
   input.min = history.simulation_start;
   input.max = history.window_end;
   if (input.dataset.planId !== planId || input.value < input.min || input.value > input.max) {
-    input.value = input.min;
+    const visibleStart = history.series[Math.max(0, history.series.length - 240)]?.date;
+    input.value = visibleStart && visibleStart > input.min ? visibleStart : input.min;
   }
   input.dataset.planId = planId;
   input.disabled = false;
@@ -460,8 +620,11 @@ function prepareEstimate(planId, history) {
 
 async function loadPlanHistory(planId) {
   if (!data?.report) {
-    $('historyChart').textContent = '刷新行情后查看历史回放';
+    $('historyChart').textContent = '刷新数据后查看历史回放';
     $('estimateStart').disabled = true;
+    $('chartPrevious').disabled = true;
+    $('chartNext').disabled = true;
+    $('chartPosition').disabled = true;
     return;
   }
   if (historyCache.has(planId)) {
@@ -472,6 +635,11 @@ async function loadPlanHistory(planId) {
   $('historyChart').textContent = '正在加载历史行情...';
   $('chartRange').textContent = '正在读取历史日 K';
   $('chartCount').textContent = '—';
+  $('chartPrevious').disabled = true;
+  $('chartNext').disabled = true;
+  $('chartPosition').disabled = true;
+  $('chartEarliest').textContent = '—';
+  $('chartLatest').textContent = '—';
   $('eventsBody').replaceChildren();
   emptyRow($('eventsBody'), 6, '正在加载历史记录...');
   try {
@@ -528,8 +696,8 @@ function openPlanDialog() {
   if (!data) return;
   $('planSource').textContent = data.sample ? '示例配置 · etf_plans.example.toml' : '本地配置 · etf_plans.toml';
   $('planModeNote').textContent = data.sample
-    ? '当前金额、策略和持仓为示例。刷新会展示最新测算，但不保存运行记录或成交，也不会下单。个人计划需先在项目根目录建立并编辑 etf_plans.toml。'
-    : '刷新会保存本次建议；只有登记真实成交后才更新持仓与本期已买入状态。页面不会下单。';
+    ? '当前金额、策略和持仓为示例。刷新会展示最新测算，但不保存运行记录，也不会下单。个人计划需先在项目根目录建立并编辑 etf_plans.toml。'
+    : '刷新会保存本次建议；页面只展示策略提示，不会下单或自动同步真实成交。';
   const body = $('planSettingsBody');
   body.replaceChildren();
   for (const plan of data.plans) {
@@ -552,10 +720,15 @@ function refreshResultMessage(next) {
   const blocked = rows.filter((row) => row.status === 'blocked').length;
   let result;
   if (buying) result = `${buying} 只 ETF 生成本期买入建议`;
-  else if (rows.length && rows.every((row) => row.status === 'market_closed')) result = '当前无当日交易行情，本期没有可执行买入';
+  else if (rows.length && rows.every((row) => row.status === 'market_closed')) result = '当前无当日交易行情，本期无买入提示';
   else if (blocked) result = `${blocked} 只生效计划的数据待补`;
   else result = '本期没有新增买入建议';
-  return `已重新获取行情${latest ? `（最新报价 ${latest}）` : ''}；${result}。${next.sample ? '示例运行不留档' : '建议已留档'}，未下单。`;
+  return `已重新获取数据${latest ? `（最新报价 ${latest}）` : ''}；${result}。${next.sample ? '示例运行不留档' : '建议已留档'}，未下单。`;
+}
+
+function valuationUpdateWarning(next) {
+  const warnings = next.valuation_update_warnings;
+  return Array.isArray(warnings) && warnings.length ? `估值数据更新提醒：${warnings.join('；')}` : '';
 }
 
 function showRefreshFeedback(message, error = false) {
@@ -565,6 +738,42 @@ function showRefreshFeedback(message, error = false) {
   feedback.hidden = !message;
 }
 
+let tradeAlertExpiry;
+function renderTradeAlerts() {
+  clearTimeout(tradeAlertExpiry);
+  const report = data?.report;
+  const generated = Date.parse(report?.generated_at || '');
+  const age = Date.now() - generated;
+  const fresh = Number.isFinite(generated) && age >= -60_000 && age < 300_000;
+  const alerts = fresh ? report.rows.filter((row) =>
+    row.selected && row.status === 'buy' && row.action_amount > 0 && row.action_shares > 0 &&
+    (!document.body.classList.contains('detail-mode') || row.plan_id === selectedId)) : [];
+  const section = $('tradeAlerts');
+  section.hidden = alerts.length === 0;
+  if (!alerts.length) return;
+  section.classList.toggle('sample', data.sample);
+  $('tradeAlertTitle').textContent = data.sample ? '示例策略触发买入条件' : '本期买入条件已触发';
+  $('tradeAlertNote').textContent = data.sample
+    ? '以下按示例预算测算，仅供观察；不是个人交易计划，系统未下单。'
+    : '仅提示策略条件；请自行核对交易时段、场内价格和费用。系统未下单。';
+  $('tradeAlertCount').textContent = `${alerts.length} 只 ETF`;
+  const body = $('tradeAlertRows');
+  body.replaceChildren();
+  for (const row of alerts) {
+    const item = document.createElement('div');
+    item.className = 'trade-alert-row';
+    const name = document.createElement('strong');
+    name.textContent = `${row.name} · ${row.code}`;
+    const amount = document.createElement('span');
+    amount.textContent = `参考预算 ${money(row.action_amount)} · ${quantity(row.action_shares)} 份 · 整手估算 ${money(row.action_cost)}`;
+    const reason = document.createElement('small');
+    reason.textContent = `${data.strategies[row.strategy]} · ${row.reason}${row.market?.quote_at ? ` · 行情 ${row.market.quote_at.replace('T', ' ').slice(0, 19)}` : ''}`;
+    item.append(name, amount, reason);
+    body.append(item);
+  }
+  tradeAlertExpiry = setTimeout(renderTradeAlerts, Math.max(1000, 300_000 - age + 100));
+}
+
 function render(next) {
   data = next;
   if (!selectedId || !data.plans.some((plan) => plan.id === selectedId)) selectedId = data.plans[0]?.id;
@@ -572,45 +781,42 @@ function render(next) {
   $('modeBadge').textContent = data.sample ? '示例计划 ⌄' : '本地计划 ⌄';
   $('modeBadge').classList.toggle('sample', data.sample);
   $('modeBadge').disabled = false;
-  $('tradeBtn').disabled = data.sample;
   const rows = (data.report?.rows || []).filter((row) => row.selected);
   $('planCount').textContent = data.plans.length;
   $('actionAmount').textContent = data.report ? money(data.report.total_action_amount) : '—';
   $('buyCount').textContent = data.report ? rows.filter((row) => row.status === 'buy').length : '—';
   $('blockedCount').textContent = data.report ? rows.filter((row) => row.status === 'blocked').length : '—';
-  $('updatedAt').textContent = data.report ? `最近测算 ${data.report.generated_at.replace('T', ' ').slice(0, 19)} · 建议未下单` : '尚无测算快照';
-  showNotice(data.sample ? '正在使用四只 ETF 的示例计划。行情可以查看；如需保存运行记录或登记真实成交，请在项目根目录建立 etf_plans.toml。' : '');
+  $('updatedAt').textContent = data.report ? `最近测算 ${data.report.generated_at.replace('T', ' ').slice(0, 19)} · 建议未下单${Date.now() - Date.parse(data.report.generated_at) >= 300_000 ? ' · 请刷新数据' : ''}` : '尚无测算快照';
+  const sampleNotice = data.sample ? '当前使用示例计划，预算仅供观察；点击右上角可查看参数。' : '';
+  const valuationWarning = valuationUpdateWarning(data);
+  showNotice([sampleNotice, valuationWarning].filter(Boolean).join(' '), Boolean(valuationWarning));
+  renderStrategyGuide();
+  renderTradeAlerts();
   renderPlans();
   renderDetail();
   renderHistory();
-  const select = $('tradePlan');
-  select.replaceChildren();
-  for (const plan of data.plans) {
-    const option = document.createElement('option');
-    option.value = plan.id;
-    option.textContent = `${plan.name} (${plan.code})`;
-    select.append(option);
-  }
 }
 
 async function refresh() {
   const button = $('refreshBtn');
   button.disabled = true;
   button.textContent = '正在获取...';
-  showRefreshFeedback('正在获取行情并重新计算建议...');
+  showRefreshFeedback('正在更新行情与估值数据并重新计算建议...');
   try {
     const next = await request('/api/refresh', {});
     historyCache.clear();
     estimateCache.clear();
+    chartViews.clear();
     currentEstimate = null;
     render(next);
-    showRefreshFeedback(refreshResultMessage(next));
+    const warning = valuationUpdateWarning(next);
+    showRefreshFeedback([refreshResultMessage(next), warning].filter(Boolean).join(' '), Boolean(warning));
   }
   catch (error) {
     showNotice(`刷新失败：${error.message}`, true);
     showRefreshFeedback(`刷新失败：${error.message}`, true);
   }
-  finally { button.disabled = false; button.textContent = '↻ 刷新行情'; }
+  finally { button.disabled = false; button.textContent = '↻ 刷新数据'; }
 }
 
 document.querySelectorAll('.tab').forEach((button) => button.addEventListener('click', () => showTab(button.dataset.tab)));
@@ -620,53 +826,52 @@ $('modeBadge').addEventListener('click', openPlanDialog);
 $('closePlanDialog').addEventListener('click', () => $('planDialog').close());
 $('donePlanDialog').addEventListener('click', () => $('planDialog').close());
 $('planDialog').addEventListener('click', (event) => { if (event.target === $('planDialog')) $('planDialog').close(); });
-function openTradeDialog() {
-  $('tradeError').hidden = true;
-  $('tradePlan').value = selectedId;
-  const parts = new Intl.DateTimeFormat('en-US', {timeZone:'Asia/Shanghai', year:'numeric', month:'2-digit', day:'2-digit'}).formatToParts(new Date());
-  const datePart = Object.fromEntries(parts.map((part) => [part.type, part.value]));
-  $('tradeDate').value = `${datePart.year}-${datePart.month}-${datePart.day}`;
-  $('tradeDialog').showModal();
-}
-$('tradeBtn').addEventListener('click', openTradeDialog);
-$('detailTradeBtn').addEventListener('click', openTradeDialog);
 $('estimateStart').addEventListener('change', () => {
   const input = $('estimateStart');
   if (input.value) loadEstimate(selectedId, input.value);
 });
-$('closeDialog').addEventListener('click', () => $('tradeDialog').close());
-$('cancelTrade').addEventListener('click', () => $('tradeDialog').close());
-$('tradeForm').addEventListener('submit', async (event) => {
-  event.preventDefault();
-  const form = event.currentTarget;
-  const button = form.querySelector('button[type=submit]');
-  const values = Object.fromEntries(new FormData(form));
-  values.shares = Number(values.shares);
-  values.price = Number(values.price);
-  values.fee = Number(values.fee);
-  button.disabled = true;
-  try {
-    await request('/api/trades', values);
-    $('tradeDialog').close();
-    form.reset();
-    await refresh();
-    if (!document.body.classList.contains('detail-mode')) showTab('history');
-  } catch (error) {
-    $('tradeError').textContent = error.message;
-    $('tradeError').hidden = false;
-  } finally { button.disabled = false; }
+document.querySelectorAll('[data-chart-period]').forEach((button) => button.addEventListener('click', () => {
+  const history = historyCache.get(selectedId);
+  if (!history) return;
+  const view = chartViews.get(selectedId) || {mode:'1y', end:history.series.length};
+  chartViews.set(selectedId, {...view, mode:button.dataset.chartPeriod});
+  renderPlanChart(history);
+}));
+for (const [id, direction] of [['chartPrevious', -1], ['chartNext', 1]]) {
+  $(id).addEventListener('click', () => {
+    const history = historyCache.get(selectedId);
+    if (!history) return;
+    const window = chartWindow(history);
+    const end = Math.max(window.size, Math.min(window.total,
+      window.end + direction * Math.max(1, Math.round(window.size / 2))));
+    chartViews.set(selectedId, {mode:window.mode, end});
+    renderPlanChart(history);
+  });
+}
+$('chartPosition').addEventListener('input', (event) => {
+  const history = historyCache.get(selectedId);
+  if (!history) return;
+  const start = Number(event.target.value);
+  const window = chartWindow(history);
+  chartViews.set(selectedId, {mode:window.mode, end:start + window.size});
+  renderPlanChart(history);
 });
 
-request('/api/dashboard').then((next) => { render(next); if (!next.report) refresh(); })
+request('/api/dashboard').then((next) => {
+  render(next);
+  const generated = Date.parse(next.report?.generated_at || '');
+  if (!Number.isFinite(generated) || Date.now() - generated >= 300_000) refresh();
+})
   .catch((error) => showNotice(`读取失败：${error.message}`, true));
 window.addEventListener('popstate', () => {
   if (!data) return;
   applyRoute();
   renderPlans();
   renderDetail();
+  renderTradeAlerts();
   window.scrollTo(0, 0);
 });
 window.addEventListener('resize', () => {
   const history = historyCache.get(selectedId);
-  if (history && !$('detail').hidden) drawChart(displayedHistory(history));
+  if (history && !$('detail').hidden) renderPlanChart(history);
 });

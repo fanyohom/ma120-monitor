@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 import warnings
 warnings.filterwarnings('ignore')
 
-# 复用监控脚本的 stocks.xlsx 读取逻辑
+# 复用监控脚本的 JSON 持仓与关注池读取逻辑
 from stock_dynamic_monitor import load_portfolio, load_watchlist
 
 # ============ 策略参数 ============
@@ -326,7 +326,7 @@ if __name__ == "__main__":
     end_date = datetime.now().strftime("%Y%m%d")
     start_date = (datetime.now() - timedelta(days=365*5)).strftime("%Y%m%d")
 
-    # 从 stocks.xlsx 读取持仓 + 关注池（去重，保持顺序）
+    # 从本地 JSON 读取持仓 + 关注池（去重，保持顺序）
     stocks = []
     seen = set()
     for it in load_portfolio() + load_watchlist():
@@ -336,7 +336,7 @@ if __name__ == "__main__":
         stocks.append((it["code"], it["name"]))
 
     if not stocks:
-        print("⚠️ stocks.xlsx 未读到任何股票，退出")
+        print("⚠️ portfolio.json 和 watchlist.json 中没有股票，退出")
         raise SystemExit(1)
 
     print(f"""

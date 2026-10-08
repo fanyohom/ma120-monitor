@@ -29,6 +29,30 @@ def market(code="510300", price=8.0):
 
 
 class ETFDataTests(unittest.TestCase):
+    @staticmethod
+    def paged_get(qfq_rows, raw_rows, ignore_end=False):
+        def get(url, **kwargs):
+            response = Mock()
+            if "fqkline/get" in url:
+                symbol, period, start, end, count, adjustment = kwargs["params"]["param"].split(",")
+                assert (symbol, period, start) == ("sh510300", "day", "")
+                assert 0 < int(count) <= 800
+                rows = qfq_rows if adjustment == "qfq" else raw_rows
+                eligible = rows if ignore_end or not end else [row for row in rows if row[0] <= end]
+                field = "qfqday" if adjustment == "qfq" else "day"
+                response.json.return_value = {"data": {symbol: {field: eligible[-int(count):]}}}
+            else:
+                fields = [""] * 31
+                fields[3], fields[6], fields[30] = "10", "1000", "20260907140000"
+                response.text = 'v_sh510300="' + "~".join(fields) + '";'
+            return response
+        return get
+
+    @staticmethod
+    def daily_rows(count):
+        dates = pd.bdate_range(end=NOW.date(), periods=count)
+        return [[day.date().isoformat(), "10", "10"] for day in dates]
+
     def test_shanghai_etf_routing(self):
         self.assertEqual(data.etf_symbol("510300"), "sh510300")
         self.assertEqual(data.etf_symbol("159915"), "sz159915")
@@ -112,6 +136,99 @@ class ETFDataTests(unittest.TestCase):
                 with self.assertRaisesRegex(OSError, "fresh request"):
                     data.fetch_market("510300", 530, NOW, Path(folder), force=True)
                 get.assert_called_once()
+
+    def test_long_history_pages_with_provider_limit_and_reuses_cache(self):
+        rows = self.daily_rows(900)
+        with tempfile.TemporaryDirectory() as folder, patch(
+            "etf_data.requests.get", side_effect=self.paged_get(rows, rows)
+        ) as get:
+            payload = data.fetch_market("510300", 900, NOW, Path(folder))
+            self.assertEqual(payload["requested_days"], 900)
+            self.assertEqual([row[0] for row in payload["qfq"]], [row[0] for row in rows])
+            self.assertEqual([row[0] for row in payload["raw"]], [row[0] for row in rows])
+            params = [call.kwargs["params"]["param"] for call in get.call_args_list
+                      if "fqkline/get" in call.args[0]]
+            self.assertEqual(len(params), 4)
+            self.assertEqual(params[0], "sh510300,day,,2026-09-07,800,qfq")
+            self.assertEqual(params[2], "sh510300,day,,2026-09-07,800,")
+            self.assertTrue(params[1].endswith(",100,qfq"))
+            self.assertTrue(params[3].endswith(",100,"))
+            self.assertLess(params[1].split(",")[3], rows[100][0])
+            self.assertEqual(data.fetch_market("510300", 900, NOW, Path(folder)), payload)
+            self.assertEqual(get.call_count, 5)
+
+    def test_paged_history_stops_at_provider_exhaustion(self):
+        rows = self.daily_rows(700)
+        with tempfile.TemporaryDirectory() as folder, patch(
+            "etf_data.requests.get", side_effect=self.paged_get(rows, rows)
+        ) as get:
+            payload = data.fetch_market("510300", 1500, NOW, Path(folder))
+            self.assertEqual(len(payload["qfq"]), 700)
+            self.assertEqual(len(payload["raw"]), 700)
+            self.assertEqual(get.call_count, 3)
+
+    def test_paged_history_stops_after_exact_full_last_page(self):
+        rows = self.daily_rows(800)
+        provider = self.paged_get(rows, rows)
+
+        def get(url, **kwargs):
+            if "fqkline/get" in url:
+                symbol, _, _, end, _, adjustment = kwargs["params"]["param"].split(",")
+                if end and end != NOW.date().isoformat() and adjustment == "qfq":
+                    response = Mock()
+                    response.json.return_value = {"data": {symbol: {"day": []}}}
+                    return response
+            return provider(url, **kwargs)
+
+        with tempfile.TemporaryDirectory() as folder, patch("etf_data.requests.get", side_effect=get) as mock_get:
+            payload = data.fetch_market("510300", 1600, NOW, Path(folder))
+            self.assertEqual(len(payload["qfq"]), 800)
+            self.assertEqual(len(payload["raw"]), 800)
+            self.assertEqual(mock_get.call_count, 5)
+
+    def test_paged_history_rejects_oversized_page_even_with_explicit_end(self):
+        rows = self.daily_rows(801)
+
+        def get(url, **kwargs):
+            response = Mock()
+            if "fqkline/get" in url:
+                symbol, _, _, _, _, adjustment = kwargs["params"]["param"].split(",")
+                field = "qfqday" if adjustment == "qfq" else "day"
+                response.json.return_value = {"data": {symbol: {field: rows}}}
+            return response
+
+        with tempfile.TemporaryDirectory() as folder, patch("etf_data.requests.get", side_effect=get):
+            with self.assertRaisesRegex(ValueError, "Invalid ETF history page"):
+                data.fetch_market("510300", 5000, NOW, Path(folder))
+
+    def test_paged_history_rejects_overlap_and_mismatched_adjustments(self):
+        rows = self.daily_rows(900)
+        with tempfile.TemporaryDirectory() as folder, patch(
+            "etf_data.requests.get", side_effect=self.paged_get(rows, rows, ignore_end=True)
+        ) as get:
+            with self.assertRaisesRegex(ValueError, "overlap"):
+                data.fetch_market("510300", 900, NOW, Path(folder))
+            self.assertEqual(get.call_count, 2)
+        with tempfile.TemporaryDirectory() as folder, patch(
+            "etf_data.requests.get", side_effect=self.paged_get(rows, rows[1:])
+        ):
+            with self.assertRaisesRegex(ValueError, "Adjusted/raw"):
+                data.fetch_market("510300", 900, NOW, Path(folder))
+
+    def test_paged_history_rejects_provider_error_after_first_page(self):
+        rows = self.daily_rows(900)
+        provider = self.paged_get(rows, rows)
+
+        def get(url, **kwargs):
+            if "fqkline/get" in url and kwargs["params"]["param"].split(",")[3]:
+                response = Mock()
+                response.json.return_value = {"code": 0, "msg": "param error", "data": []}
+                return response
+            return provider(url, **kwargs)
+
+        with tempfile.TemporaryDirectory() as folder, patch("etf_data.requests.get", side_effect=get):
+            with self.assertRaisesRegex(ValueError, "provider returned an error"):
+                data.fetch_market("510300", 900, NOW, Path(folder))
 
 
 class ValuationTests(unittest.TestCase):
@@ -208,6 +325,7 @@ class DCATests(unittest.TestCase):
         self.assertTrue(dca.period(plan, date(2026, 9, 11))[1])
 
     def test_fill_updates_cost_and_suppresses_repeat_period(self):
+        self.plan["strategy"] = "ma"
         dca.record_trade(self.db, self.plan, "fill-1", "buy", 100, 8, 5, NOW.date(), NOW.date())
         self.assertEqual(dca.position(self.plan, self.db, NOW.date()), (100, 8.05))
         selected = next(row for row in self.report()["rows"] if row["plan_id"] == "csi300" and row["selected"])

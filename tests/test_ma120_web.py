@@ -8,7 +8,9 @@ from unittest.mock import patch
 import pandas as pd
 from openpyxl import Workbook
 
-from ma120_web import build_ma120_dashboard
+from ma120_web import build_ma120_dashboard, build_ma120_history, estimate_ma120_profit
+from portfolio_store import write_portfolio
+from watchlist_store import write_watchlist
 
 
 def history(close=100, count=121):
@@ -17,6 +19,100 @@ def history(close=100, count=121):
 
 
 class Ma120WebTests(unittest.TestCase):
+    def test_history_marks_only_completed_close_crossings(self):
+        dates = pd.bdate_range(end="2026-10-02", periods=126)
+        closes = [100] * 120 + [87, 87, 115, 115, 87, 100]
+        bars = pd.DataFrame({"close": closes}, index=dates)
+        calls = []
+
+        def load(code, *, days):
+            calls.append((code, days))
+            return bars
+
+        result = build_ma120_history("600001", "测试股票", hist_loader=load,
+                                     now=datetime(2026, 10, 5, 10))
+        self.assertEqual(calls, [("600001", 800)])
+        self.assertEqual(result["currency"], "CNY")
+        self.assertEqual((result["buy_count"], result["sell_count"]), (2, 1))
+        self.assertEqual([point["side"] for point in result["signals"]],
+                         ["buy", "sell", "buy"])
+        self.assertEqual(result["signals"][0]["price"], 87)
+        self.assertEqual(result["signals"][0]["threshold"],
+                         result["series"][1]["buy_line"])
+        self.assertIsNone(result["series"][0]["signal"])
+        self.assertIsNone(result["series"][2]["signal"])
+        self.assertEqual(result["window_end"], "2026-10-02")
+        json.dumps(result, allow_nan=False)
+
+    def test_history_excludes_current_unfinished_daily_bar(self):
+        dates = pd.bdate_range(end="2026-10-05", periods=122)
+        bars = pd.DataFrame({"close": [100] * 121 + [87]}, index=dates)
+        result = build_ma120_history("HK01801", "港股", hist_loader=lambda *_args, **_kw: bars,
+                                     now=datetime(2026, 10, 5, 10))
+        self.assertEqual(result["currency"], "HKD")
+        self.assertEqual(result["window_end"], "2026-10-02")
+        self.assertEqual(result["signals"], [])
+
+    def test_history_rejects_stale_future_duplicate_and_invalid_bars(self):
+        base = pd.DataFrame({"close": [100] * 121},
+                            index=pd.bdate_range(end="2026-10-02", periods=121))
+        cases = {
+            "过期": base.set_axis(pd.bdate_range(end="2026-09-01", periods=121)),
+            "未来": pd.concat([base, pd.DataFrame({"close": [100]},
+                                                    index=pd.to_datetime(["2026-10-06"]))]),
+            "重复": pd.concat([base, base.iloc[[-1]]]),
+            "无效": base.assign(close=[100] * 120 + [float("nan")]),
+        }
+        for label, bars in cases.items():
+            with self.subTest(label=label), self.assertRaises(ValueError):
+                build_ma120_history("600001", "测试", hist_loader=lambda *_a, **_k: bars,
+                                    now=datetime(2026, 10, 5, 10))
+
+    def test_history_bounds_visible_window_after_full_history_calculation(self):
+        dates = pd.bdate_range(end="2026-10-02", periods=500)
+        bars = pd.DataFrame({"close": [100] * 500}, index=dates)
+        result = build_ma120_history("600001", "测试", hist_loader=lambda *_a, **_k: bars,
+                                     now=datetime(2026, 10, 5, 10))
+        self.assertEqual(len(result["series"]), 360)
+        self.assertEqual(result["window_start"], result["series"][0]["date"])
+        self.assertEqual(result["series"][0]["ma120"], 100)
+
+    def test_estimate_uses_next_close_and_independent_position(self):
+        points = [
+            ("2026-09-28", 100, None), ("2026-09-29", 90, "buy"),
+            ("2026-09-30", 80, None), ("2026-10-01", 95, "sell"),
+            ("2026-10-02", 100, None), ("2026-10-05", 50, "buy"),
+            ("2026-10-06", 40, None), ("2026-10-07", 45, "sell"),
+        ]
+        replay = {"currency": "CNY", "series": [
+            {"date": day, "close": close, "signal": signal}
+            for day, close, signal in points]}
+        result = estimate_ma120_profit(replay, "2026-09-28")
+        self.assertEqual([(trade["signal_date"], trade["date"], trade["side"])
+                          for trade in result["trades"]], [
+                              ("2026-09-29", "2026-09-30", "buy"),
+                              ("2026-10-01", "2026-10-02", "sell"),
+                              ("2026-10-05", "2026-10-06", "buy")])
+        self.assertEqual(result["trades"][0]["units"], 1250)
+        self.assertEqual((result["estimated_value"], result["profit"], result["return_pct"]),
+                         (140625, 40625, 40.62))
+        self.assertEqual((result["buy_count"], result["sell_count"], result["open_position"]),
+                         (2, 1, True))
+        self.assertEqual(result["initial_capital"], 100000)
+        json.dumps(result, allow_nan=False)
+
+        later = estimate_ma120_profit(replay, "2026-09-30")
+        self.assertEqual([trade["side"] for trade in later["trades"]], ["buy"])
+        self.assertEqual(later["estimated_value"], 112500)
+        self.assertEqual(estimate_ma120_profit(replay, "2026-10-07")["trades"], [])
+
+    def test_estimate_rejects_invalid_or_out_of_window_start(self):
+        replay = {"series": [{"date": "2026-10-01", "close": 100, "signal": "buy"},
+                             {"date": "2026-10-02", "close": 90, "signal": None}]}
+        for start in (None, "bad-date", "2026-09-30", "2026-10-03"):
+            with self.subTest(start=start), self.assertRaises(ValueError):
+                estimate_ma120_profit(replay, start)
+
     def test_dashboard_preserves_crossing_signal_and_position_pnl(self):
         calls = []
 
@@ -194,51 +290,94 @@ class Ma120WebTests(unittest.TestCase):
                 self.assertEqual(result["summary"]["data_unavailable"], 1)
                 self.assertEqual(result["summary"]["pnl_coverage"], 0)
 
-    def test_missing_or_unreadable_workbook_reports_source_error(self):
+    def test_missing_or_unreadable_portfolio_json_reports_source_error(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            path = Path(tmpdir) / "stocks.xlsx"
-            with patch("stock_dynamic_monitor.STOCKS_FILE", str(path)):
+            path = Path(tmpdir) / "portfolio.json"
+            watchlist = Path(tmpdir) / "watchlist.json"
+            with patch("stock_dynamic_monitor.PORTFOLIO_JSON", str(path)), \
+                    patch("stock_dynamic_monitor.WATCHLIST_JSON", str(watchlist)):
                 missing = build_ma120_dashboard(hist_loader=lambda code: self.fail("no rows"))
                 self.assertIn("未找到", missing["source_error"])
+                self.assertIn("portfolio.json", missing["source_error"])
                 self.assertEqual(missing["summary"]["portfolio_count"], 0)
 
-                path.write_text("not an xlsx", encoding="utf-8")
+                path.write_text("not json", encoding="utf-8")
+                watchlist.write_text("not json", encoding="utf-8")
                 unreadable = build_ma120_dashboard(hist_loader=lambda code: self.fail("no rows"))
                 self.assertIn("读取", unreadable["source_error"])
-                self.assertIn("portfolio", unreadable["source_error"])
-                self.assertIn("watchlist", unreadable["source_error"])
+                self.assertIn("portfolio.json", unreadable["source_error"])
+                self.assertIn("watchlist.json", unreadable["source_error"])
+                self.assertEqual(unreadable["portfolio"], [])
 
-    def test_missing_required_sheet_reports_source_error(self):
+    def test_legacy_workbook_is_not_read_when_json_exists(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            path = Path(tmpdir) / "stocks.xlsx"
+            workbook_path = Path(tmpdir) / "stocks.xlsx"
+            portfolio = Path(tmpdir) / "portfolio.json"
+            watchlist = Path(tmpdir) / "watchlist.json"
             workbook = Workbook()
             workbook.active.title = "portfolio"
             workbook.active.append(["code", "name", "cost", "shares"])
-            workbook.save(path)
-            with patch("stock_dynamic_monitor.STOCKS_FILE", str(path)):
-                result = build_ma120_dashboard(hist_loader=lambda code: self.fail("no rows"))
-            self.assertIn("watchlist", result["source_error"])
+            workbook.active.append(["600002", "旧表持仓", "1", "2"])
+            workbook.save(workbook_path)
+            write_portfolio([], portfolio)
+            write_watchlist([{"code": "600001", "name": "关注标的"}], watchlist)
+            with patch("stock_dynamic_monitor.STOCKS_FILE", str(workbook_path)), \
+                    patch("stock_dynamic_monitor.PORTFOLIO_JSON", str(portfolio)), \
+                    patch("stock_dynamic_monitor.WATCHLIST_JSON", str(watchlist)), \
+                    patch("stock_dynamic_monitor._read_xlsx_rows", side_effect=AssertionError("legacy read")):
+                result = build_ma120_dashboard(
+                    hist_loader=lambda code: history(), quote_loader=lambda code: {},
+                    now=datetime(2026, 5, 1, 16, 0))
+            self.assertIsNone(result["source_error"])
             self.assertEqual(result["portfolio"], [])
+            self.assertEqual(result["summary"]["watchlist_count"], 1)
 
-    def test_missing_first_sheet_still_loads_watchlist(self):
+    def test_missing_portfolio_json_still_loads_watchlist_without_excel_fallback(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            path = Path(tmpdir) / "stocks.xlsx"
+            workbook_path = Path(tmpdir) / "stocks.xlsx"
+            portfolio = Path(tmpdir) / "portfolio.json"
+            watchlist = Path(tmpdir) / "watchlist.json"
             workbook = Workbook()
-            workbook.active.title = "watchlist"
-            workbook.active.append(["code", "name"])
-            workbook.active.append(["600001", "关注标的"])
-            workbook.save(path)
-            with patch("stock_dynamic_monitor.STOCKS_FILE", str(path)):
+            workbook.active.title = "portfolio"
+            workbook.active.append(["code", "name", "cost", "shares"])
+            workbook.active.append(["600002", "旧表持仓", "1", "2"])
+            workbook.save(workbook_path)
+            write_watchlist([{"code": "600001", "name": "关注标的"}], watchlist)
+            with patch("stock_dynamic_monitor.STOCKS_FILE", str(workbook_path)), \
+                    patch("stock_dynamic_monitor.PORTFOLIO_JSON", str(portfolio)), \
+                    patch("stock_dynamic_monitor.WATCHLIST_JSON", str(watchlist)), \
+                    patch("stock_dynamic_monitor._read_xlsx_rows", side_effect=AssertionError("legacy read")):
                 result = build_ma120_dashboard(
                     hist_loader=lambda code: history(),
                     quote_loader=lambda code: {},
                     now=datetime(2026, 5, 1, 16, 0),
                 )
-            self.assertIn("portfolio", result["source_error"])
-            self.assertNotIn("watchlist] 失败", result["source_error"])
+            self.assertIn("portfolio.json", result["source_error"])
+            self.assertNotIn("watchlist.json", result["source_error"])
+            self.assertEqual(result["portfolio"], [])
             self.assertEqual(result["summary"]["watchlist_count"], 1)
             self.assertEqual(result["watchlist"][0]["name"], "关注标的")
             self.assertIsNone(result["watchlist"][0]["error"])
+
+    def test_runtime_portfolio_json_preserves_cost_and_shares(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            portfolio = Path(tmpdir) / "portfolio.json"
+            watchlist = Path(tmpdir) / "watchlist.json"
+            write_portfolio([{"code": "600001", "name": "持仓标的", "cost": 80,
+                              "shares": 100}], portfolio)
+            write_watchlist([{"code": "600001", "name": "重复关注"}], watchlist)
+            with patch("stock_dynamic_monitor.PORTFOLIO_JSON", str(portfolio)), \
+                    patch("stock_dynamic_monitor.WATCHLIST_JSON", str(watchlist)):
+                result = build_ma120_dashboard(
+                    hist_loader=lambda code: history(),
+                    quote_loader=lambda code: {"price": 100, "quote_date": "2026-05-01"},
+                    now=datetime(2026, 5, 1, 16, 0),
+                )
+            self.assertIsNone(result["source_error"])
+            self.assertEqual(result["watchlist"], [])
+            self.assertEqual(result["portfolio"][0]["name"], "持仓标的")
+            self.assertEqual(result["portfolio"][0]["cost_basis"], 8000)
+            self.assertEqual(result["portfolio"][0]["market_value"], 10000)
 
 
 if __name__ == "__main__":
