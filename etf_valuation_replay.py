@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from etf_data import DataError, positive
+from etf_data import DataError, load_valuation_history
 
 
 class ValuationReplay:
@@ -14,21 +14,7 @@ class ValuationReplay:
         self.path = Path(path)
         self.index_code = index_code
         self.settings = settings.copy()
-        if not self.path.exists():
-            raise DataError(f"Missing valuation CSV: {self.path.name}")
-
-        frame = pd.read_csv(self.path, dtype={"index_code": str})
-        required = {"date", "available_date", "index_code", "pe_ttm"}
-        if not required.issubset(frame.columns):
-            raise DataError("Valuation CSV needs date,available_date,index_code,pe_ttm")
-        frame = frame[frame["index_code"] == index_code].copy()
-        frame["date"] = pd.to_datetime(frame["date"], format="%Y-%m-%d", errors="raise")
-        frame["available_date"] = pd.to_datetime(frame["available_date"], format="%Y-%m-%d", errors="raise")
-        if frame["date"].isna().any() or frame["available_date"].isna().any():
-            raise DataError("Invalid valuation or publication date")
-        if (frame["available_date"] < frame["date"]).any() or frame["date"].duplicated().any():
-            raise DataError("Invalid publication dates or duplicate valuation dates")
-        frame["pe_ttm"] = frame["pe_ttm"].map(lambda value: positive(value, "pe_ttm"))
+        frame = load_valuation_history(self.path, index_code)
         frame = frame.sort_values("date")
 
         self.dates = frame["date"].to_numpy(dtype="datetime64[D]")

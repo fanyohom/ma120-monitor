@@ -25,8 +25,8 @@
 - **港股：** 腾讯前复权日 K 和实时盘口行情，股票代码使用 `HK` 加 5 位数字，例如 `HK01801`。
 - **现价：** 使用实时盘口最新成交价，用于计算当前偏离率和判断信号。
 - **MA120：** 只根据日 K 收盘价序列计算，实时价不会直接替换均线序列中的收盘价。
-- **缓存：** 日 K 本地 JSON 缓存在 `.stock_cache/`，同一自然日内复用，跨日自动刷新；实时盘口不走本地缓存。
-- **回退：** 实时盘口请求失败时，现价会回退到日 K 最新收盘价，保证脚本不中断。
+- **持久化：** 股票和 ETF 日 K、报价保存在本地 SQLite 数据库 `data/market.sqlite3`，不会因跨天失效而删除；`.stock_cache/` 只作为旧文件迁移来源。
+- **回退：** 接口异常时保留并读取数据库里已有的历史数据，页面显示实际行情日期，旧数据不生成新的买入或今日穿越信号。
 - **交易日判断：** 带上 `--skip-non-trading-day` 时，会先用几支大盘股（600015/601318/000651）探测当日实时行情；取不到就判定为非交易日并跳过推送，避免法定节假日调休时空推卡片。该判断**只在 09:30 之后可靠**——开盘前取不到实时价，无法区分「还没开盘」和「非交易日」。
 
 ### 信号判定
@@ -45,8 +45,8 @@ ma120-monitor/
 ├── stock_monitor.py             # 旧版（保留备查）
 ├── stock_portfolio_monitor.py   # 旧版（保留备查）
 ├── backtest_ma120_strategy.py   # MA120 策略回测工具
-├── portfolio.json               # 本地持仓，监控脚本与 Web 共用
-├── watchlist.json               # 本地关注池，Web 与监控脚本共用
+├── config_store.py              # SQLite 配置、事务与一次性迁移
+├── doc/configuration-schema.sql # 配置表结构（初始化使用同一份 DDL）
 ├── stocks.xlsx                  # 旧数据，仅用于一次性迁移
 ├── pyproject.toml               # 项目元数据与依赖清单
 ├── uv.lock                      # 依赖锁定文件
@@ -56,7 +56,8 @@ ma120-monitor/
 ├── .github/workflows/           # GitHub Actions 定时任务
 ├── doc/images/                  # README 示例图片
 ├── LICENSE                      # MIT
-└── .stock_cache/                # 日 K 行情缓存（当天有效，一只一个 JSON）
+├── data/market.sqlite3          # 持久化行情数据库（本地，不入 Git）
+└── .stock_cache/                # 旧行情缓存（保留，用于迁移）
 ```
 
 ## 用法
@@ -139,26 +140,17 @@ uv run python stock_dynamic_monitor.py --no-feishu
 
 ## 配置
 
-持仓与关注池分别保存在项目根目录的 `portfolio.json` 和 `watchlist.json`；MA120 Web、监控脚本及回测工具读取同一份数据，不再从 Excel 读取。首次从旧 `stocks.xlsx` 迁移时运行：
+所有关注与投资配置统一保存在 **`data/market.sqlite3`**：股票关注池、当前持仓、ETF 计划、投入周期、预算、金额阶梯与估值规则。MA120 Web、命令行监控、ETF 策略及回测工具读取同一份数据库配置。
 
 ```bash
-uv run python scripts/migrate_portfolio.py
-uv run python scripts/migrate_watchlist.py
+uv run python scripts/migrate_configuration.py
 ```
 
-迁移脚本只读取旧工作簿，不修改它，也不会覆盖已有 JSON。此项目当前旧 `portfolio` sheet 没有持仓记录，因此迁移后 `portfolio.json` 的 `items` 为空。持仓以后可直接编辑本地 JSON，成本和份额须为非负数；成本或份额为 0 时只监控信号，不计算浮盈：
+打开 [配置管理](http://127.0.0.1:8765/configuration) 即可在页面新增、编辑或移出关注股票与持仓，维护 ETF 生效策略、预算及周期，并修改全局策略规则。成本和份额为非负数；股票成本或份额为 0 时只监控信号，不计算浮盈。
 
-```json
-{"version": 1, "items": [{"code": "600015", "name": "华夏银行", "cost": 5.25, "shares": 1000}]}
-```
+迁移优先读取已有 `watchlist.json/portfolio.json/etf_plans.toml`，股票 JSON 缺失时才尝试旧 Excel，ETF 个人文件缺失时使用模板种子。只导入一次，不修改原文件；此后修改旧文件不会覆盖数据库。主动清空关注池后也不会重新导入旧清单。持仓与关注池有相同代码时，页面优先显示持仓。
 
-关注池可在 MA120 页面增删改，或编辑本地 JSON：
-
-```json
-{"version": 1, "items": [{"code": "601998", "name": "中信银行"}]}
-```
-
-两个 JSON 及其修改前的 `.bak` 备份都是本地个人数据，已排除 Git。程序写入时会校验字段和重复代码，并原子替换文件；`portfolio.json` 缺失或任一 JSON 损坏时，页面会明确报错，不会悄悄回退到旧 Excel 清单。尚未建立 `watchlist.json` 时关注池为空。持仓与关注池有相同代码时，页面优先显示持仓。
+表结构、约束和接口说明见 [数据库设计](doc/database-design.md)，可直接查看 [配置 DDL](doc/configuration-schema.sql)。每次配置修改会在同一事务中更新版本并保存配置快照；停用 ETF 不会删除其历史成交。飞书 webhook 仍使用 `.env.local` 或环境变量。
 
 港股代码请使用 `HK` 加 5 位数字，例如信达生物写作 `HK01801`，以保留前导零并自动切换港股行情源。
 
@@ -169,6 +161,41 @@ uv run python scripts/migrate_watchlist.py
 1. 环境变量 `FEISHU_WEBHOOK_URL`
 2. 项目根目录 `.env.local` 中的 `FEISHU_WEBHOOK_URL`
 3. 都没配置时，脚本会跳过飞书推送并在终端提示
+
+## 行情数据库
+
+项目使用本地 SQLite，无需安装或配置 MySQL。默认文件是 **`data/market.sqlite3`**，同时保存行情与个人配置；现有 `dca_results/journal.sqlite3` 成交及运行账本继续保留。
+
+首次升级可把已有文件迁移入库：
+
+```powershell
+uv run python scripts/migrate_market_data.py
+```
+
+迁移会导入 `.stock_cache/sina_*.json`、`.stock_cache/etf/日期/*.json` 和 `etf_valuations/*.csv`，保留所有原文件。可重复执行，相同历史版本不重复入库。损坏或复权日期不一致的文件会列在 `skipped` 中；数据库不会用无效数据替换已有版本。
+
+数据读取规则：
+
+- 打开股票/ETF 页面，以及查看历史详情和历史测算，读取数据库；页面不再因快照过期而自动联网。点击“刷新数据/刷新行情”才请求接口并保存成功的数据。
+- 命令行监控仍按需要更新行情：股票同日可复用数据，ETF 同日 5 分钟内可复用。刷新失败会读取数据库已有记录，不清空数据；未曾保存过的品种仍显示数据待补。
+- 前复权与未复权行情按**完整版本**保存，不把不同批次的复权价格拼接在一起。短历史刷新不会删除已保存的长历史；历史详情可选择数据库中有足够长度的版本，显示实际日期。
+- 报价日期、均线截止日期、数据来源与获取时间一起保存。历史数据仍可显示均线和价格，但标记为“数据库历史行情”并暂停新买入提示。旧报价不是实时价。
+- PE CSV 是导入入口；有效估值历史入库后，即使移走 CSV，也能按原 `valuation_csv` 与 `index_code` 从数据库读取。口径、公布日期、最小样本和新鲜度检查仍有效。没有获取或导入过的指数 PE 不会凭空出现。
+- MA120 页面不再仅依赖服务内存：重启服务后可以直接使用数据库中的日 K、报价和已保存的测算快照。
+
+主要数据表为 `history_versions`（行情版本与来源）、`daily_bars`（按版本保存的日 K）、`quotes`（报价）、`valuation_versions/index_valuations`（指数估值）、`dashboard_snapshots`（MA120 测算快照）。数据库采用 SQLite WAL，支持 Web 刷新与页面读取并行。
+
+**`data/` 已排除 Git，是需要保留的本地数据，不是可随意清理的缓存。** 若删除数据库与旧缓存，就需要重新获取行情。建议定期备份：
+
+```powershell
+# 服务运行期间也可用；通过 SQLite backup API 保存一致的备份
+uv run python scripts/backup_market_data.py
+
+# 指定备份位置（目标不能是已有文件）
+uv run python scripts/backup_market_data.py --output data/backups/my-market.sqlite3
+```
+
+默认备份放在 `data/backups/`，包含行情和个人配置。恢复时先停止本地服务，再用备份替换数据库；不要在服务运行中仅复制主 `.sqlite3` 文件而忽略 WAL。ETF 成交账本 `dca_results/journal.sqlite3` 需另外保留。
 
 ## ETF 定投
 
@@ -192,7 +219,7 @@ uv run python web_app.py
 
 计划详情的历史图显示深色前复权价格线、同一价格尺度上的虚线均线、按当前生效策略重算的模拟 B 点，以及成交账本中的真实 B/S 点。悬浮或点击图表可查看就近交易日的前复权与未复权收盘价、MA、偏离率、日涨跌和当日事件；估值策略还显示当时可用的 PE 与分位。聚焦图表后也可用左右方向键逐日查看。两条图线统一换算到最新收盘价尺度，避免分红或拆分导致未复权价格与前复权均线混画；每个历史日的 MA 只使用此前 N 根已完成日 K，不含当日，整手预算和事件表价格仍使用当日未复权收盘价。模拟 B 按周期只显示一次可买整手的日期，是规则回放，不代表实际下单。当前 ETF 策略没有定义自动卖出规则，因此模拟 S 不生成；S 只来自已登记的真实卖出。事件列表保留完整回溯区间，图表只显示当前选中的时间窗口；超出行情覆盖范围的实际成交会标明。
 
-没有 `etf_plans.toml` 时，页面使用 `etf_plans.example.toml` 展示示例计划，仍可刷新数据，但不会保存运行记录。要保存自己的计划和成交账本，先按下文创建并编辑 `etf_plans.toml`。历史 PE CSV 未提供时，估值策略会显示数据待补。
+首次没有个人计划时，数据库会导入模板作为示例种子；在配置管理页保存个人计划后启用运行留档。模板和旧 `etf_plans.toml` 不再作为日常配置来源。没有导入过对应 PE 历史时，估值策略仍显示数据待补。
 
 股票 MA120 和 ETF 定投是两个独立入口。ETF 模块只生成计划、保存结果和登记你已经成交的交易，**不连接券商、不自动下单**。ETF 清单不放在 `stocks.xlsx`，避免与股票信号混在一起。
 
@@ -200,10 +227,10 @@ uv run python web_app.py
 
 ### 启动与清单
 
-首次在项目目录执行（已有本地配置时不要覆盖）：
+首次迁移配置后，在项目目录执行：
 
 ```powershell
-Copy-Item etf_plans.example.toml etf_plans.toml
+uv run python scripts/migrate_configuration.py
 
 # 只看四只 ETF 的生效策略，不推送
 uv run python etf_dca.py
@@ -218,9 +245,7 @@ uv run python etf_dca.py --compare --feishu
 uv run python stock_dynamic_monitor.py --etf --compare --no-feishu
 ```
 
-macOS/Linux 首次使用 `cp etf_plans.example.toml etf_plans.toml`。其他命令一致。
-
-编辑 `etf_plans.toml`，模板已提供以下四只境内上市 ETF，单位均为人民币：
+Windows/macOS/Linux 使用同一套命令。通过配置管理页编辑数据库中的计划，模板种子提供以下四只境内上市 ETF，单位均为人民币：
 
 | 计划 ID | ETF | 代码 | 跟踪指数标识 |
 | --- | --- | --- | --- |
@@ -250,7 +275,7 @@ macOS/Linux 首次使用 `cp etf_plans.example.toml etf_plans.toml`。其他命�
 
 ### 三种计算规则
 
-均线定投的均线周期由 `[settings].ma_days` 配置，支持 120、180、250、500 等，当前上限 600。公式为 `最近 N 个已完成交易日的前复权收盘价之和 / N`，**始终排除运行当天的日 K**，避免盘中未收盘的 K 线改变均线。偏离为 `(实时价 / 均线 - 1) * 100%`。
+均线定投的均线周期在配置管理页设置，支持 120、180、250、500 等，当前上限 600。公式为 `最近 N 个已完成交易日的前复权收盘价之和 / N`，**始终排除运行当天的日 K**，避免盘中未收盘的 K 线改变均线。偏离为 `(实时价 / 均线 - 1) * 100%`。
 
 涨跌幅定投使用 `(实时价 / 持仓平均成本 - 1) * 100%`。尚无持仓时，首期按基础金额；有持仓时必须有有效成本。买入成交金额和佣金计入平均成本，卖出按比例减少持仓成本总额。
 
@@ -305,9 +330,9 @@ etf_valuations/NDX.csv
 
 ### 行情、周期与结果
 
-- ETF 日 K 使用腾讯前复权和未复权序列，以最新共同日的开盘价比例将复权序列换算到当前价格尺度，再与腾讯实时价比较。使用盘中固定的开盘价，避免两次接口请求的当日收盘价不同而导致均线漂移。复权序列缺失时不会悄悄用未复权替代。
+- ETF 日 K 使用腾讯前复权和未复权序列，请求截止日固定为运行前一天，避免接口额外追加当日盘中 K 线导致数量或日期不一致；实时价格单独获取。以最新共同日的开盘价比例将复权序列换算到比较价格尺度，再与腾讯实时价比较。复权序列缺失时不会悄悄用未复权替代。
 - ETF 均线基于**境内 ETF 的人民币场内价格**。标普/纳斯达克 ETF 的价格还受汇率和折溢价影响，不等于美国指数本身的均线；本版尚未加入 IOPV/溢价过滤。
-- `.stock_cache/etf/日期/` 保存完整行情快照，同日最多复用 5 分钟；不会删除旧快照。取长均线时不会复用短历史缓存。网络失败会明确显示数据错误。
+- ETF 完整行情版本保存在 `data/market.sqlite3`，同日最多复用 5 分钟；旧 `.stock_cache/etf/日期/` 文件保留供迁移。取长均线时优先选择有足够长度的数据库版本。网络失败继续显示历史行情、实际日期和更新错误，不产生新买入提示。
 - `frequency` 支持 `daily`、`weekly`、`monthly`；周计划 `weekday=0..4` 表示周一至周五，月计划 `monthday=1..28`。计划日非交易日时，同周/同月内顺延到有当日交易行情的运行日；不会补买更早周期遗漏的预算。运行脚本本身不会安装定时任务。
 - 使用当日有效、有成交量的行情判断可生成计划，盘中还检查行情是否在 10 分钟内。休市、停牌或旧行情只展示参考，不产生本期买入预算。收盘后可用当日收盘盘口生成建议。
 - 每次运行保存独立的 `dca_results/时间_运行ID.json` 和 `.txt`，并保存到 `journal.sqlite3` 的 reports 表。JSON 包含配置快照、行情时间、均线日期、估值样本区间、预算和原因。此处是运行建议的留档，**不是收益回测结果**。

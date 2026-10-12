@@ -31,6 +31,7 @@ backtest_results/
 etf_plans.toml
 etf_valuations/
 dca_results/
+data/
 watchlist.json
 watchlist.json.bak
 portfolio.json

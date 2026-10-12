@@ -50,7 +50,7 @@ class ETFDataTests(unittest.TestCase):
 
     @staticmethod
     def daily_rows(count):
-        dates = pd.bdate_range(end=NOW.date(), periods=count)
+        dates = pd.bdate_range(end=NOW.date() - timedelta(days=1), periods=count)
         return [[day.date().isoformat(), "10", "10"] for day in dates]
 
     def test_shanghai_etf_routing(self):
@@ -149,12 +149,16 @@ class ETFDataTests(unittest.TestCase):
             params = [call.kwargs["params"]["param"] for call in get.call_args_list
                       if "fqkline/get" in call.args[0]]
             self.assertEqual(len(params), 4)
-            self.assertEqual(params[0], "sh510300,day,,2026-09-07,800,qfq")
-            self.assertEqual(params[2], "sh510300,day,,2026-09-07,800,")
+            self.assertEqual(params[0], "sh510300,day,,2026-09-06,800,qfq")
+            self.assertEqual(params[2], "sh510300,day,,2026-09-06,800,")
             self.assertTrue(params[1].endswith(",100,qfq"))
             self.assertTrue(params[3].endswith(",100,"))
             self.assertLess(params[1].split(",")[3], rows[100][0])
-            self.assertEqual(data.fetch_market("510300", 900, NOW, Path(folder)), payload)
+            saved = data.fetch_market("510300", 900, NOW, Path(folder))
+            self.assertEqual(saved["qfq"], payload["qfq"])
+            self.assertEqual(saved["raw"], payload["raw"])
+            self.assertEqual(saved["quote_at"], payload["quote_at"])
+            self.assertEqual(saved["read_source"], "database")
             self.assertEqual(get.call_count, 5)
 
     def test_paged_history_stops_at_provider_exhaustion(self):
@@ -174,7 +178,7 @@ class ETFDataTests(unittest.TestCase):
         def get(url, **kwargs):
             if "fqkline/get" in url:
                 symbol, _, _, end, _, adjustment = kwargs["params"]["param"].split(",")
-                if end and end != NOW.date().isoformat() and adjustment == "qfq":
+                if end and end != (NOW.date() - timedelta(days=1)).isoformat() and adjustment == "qfq":
                     response = Mock()
                     response.json.return_value = {"data": {symbol: {"day": []}}}
                     return response
@@ -185,6 +189,27 @@ class ETFDataTests(unittest.TestCase):
             self.assertEqual(len(payload["qfq"]), 800)
             self.assertEqual(len(payload["raw"]), 800)
             self.assertEqual(mock_get.call_count, 5)
+
+    def test_live_raw_bar_does_not_break_adjusted_history_alignment(self):
+        rows = self.daily_rows(530)
+        provider = self.paged_get(rows, rows)
+
+        def get(url, **kwargs):
+            response = provider(url, **kwargs)
+            if "fqkline/get" in url:
+                symbol, _, _, end, _, adjustment = kwargs["params"]["param"].split(",")
+                if not adjustment and end == NOW.date().isoformat():
+                    response.json.return_value["data"][symbol]["day"].append(
+                        [NOW.date().isoformat(), "10", "11"]
+                    )
+            return response
+
+        with tempfile.TemporaryDirectory() as folder, patch("etf_data.requests.get", side_effect=get):
+            payload = data.fetch_market("510300", 530, NOW, Path(folder))
+            self.assertEqual(payload["qfq"], payload["raw"])
+            self.assertEqual(len(payload["raw"]), 530)
+            self.assertEqual(payload["raw"][-1][0], "2026-09-04")
+            self.assertTrue(data.market_metrics(payload, 500, NOW)["tradable"])
 
     def test_paged_history_rejects_oversized_page_even_with_explicit_end(self):
         rows = self.daily_rows(801)

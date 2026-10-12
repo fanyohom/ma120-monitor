@@ -16,9 +16,12 @@ from etf_valuation_replay import ValuationReplay
 from etf_catalog import ETF_DEFINITIONS
 from etf_dca import (BASE_DIR, STRATEGIES, build_report, evaluate, load_config, open_journal,
                      period, record_trade)
-from ma120_web import build_ma120_dashboard, build_ma120_history, estimate_ma120_profit
+from ma120_web import build_ma120_dashboard, build_ma120_history, estimate_ma120_profit, HISTORY_FETCH_BARS
 from scripts.update_csi300_valuation import update_valuation
 from watchlist_store import read_watchlist, write_watchlist, normalize_code
+from market_store import MarketStore, database_for_cache
+from config_store import ConfigurationStore
+import stock_dynamic_monitor as monitor
 
 
 WEB_DIR = BASE_DIR / "web"
@@ -77,7 +80,7 @@ def replay_history(plan, settings, payload, fills, today, display_days=240, valu
     completed = adjusted.index[adjusted.index.date < today]
     if completed.empty:
         raise ValueError("没有已完成的日 K")
-    if (today - completed[-1].date()).days > 15:
+    if (today - completed[-1].date()).days > 15 and payload.get("read_source") != "database":
         raise ValueError("历史行情已过期")
     ma_days = settings["ma_days"]
     start = max(0, len(completed) - display_days)
@@ -169,16 +172,22 @@ def estimate_profit(plan, settings, history, start_date):
 
 
 class DashboardService:
-    def __init__(self, config_path=BASE_DIR / "etf_plans.toml", market_loader=None,
+    def __init__(self, config_path=None, market_loader=None,
                  valuation_updater=None):
-        self.config_path = Path(config_path)
+        self.config_path = Path(config_path) if config_path is not None else None
+        self.configuration_store = ConfigurationStore() if config_path is None else None
         self.market_loader = market_loader
         self.valuation_updater = valuation_updater if valuation_updater is not None else update_valuation
 
     def _config(self):
+        if self.configuration_store:
+            return self.configuration_store.config(), self.configuration_store.summary()["sample"]
         sample = not self.config_path.exists()
         path = BASE_DIR / "etf_plans.example.toml" if sample else self.config_path
-        return load_config(path), sample
+        config = load_config(path)
+        if sample:
+            config["directory"] = self.config_path.parent.resolve()
+        return config, sample
 
     @staticmethod
     def _journal(config, sample):
@@ -209,7 +218,7 @@ class DashboardService:
         with closing(self._journal(config, sample)) as db:
             if refresh:
                 loader = self.market_loader or (
-                    lambda code, days, instant, cache: fetch_market(code, days, instant, cache, force=True)
+                    lambda code, days, instant, cache: fetch_market(code, max(days, ETF_HISTORY_BARS), instant, cache, force=True)
                 )
                 report = build_report(config, db, now, market_loader=loader)
                 if not sample:
@@ -217,10 +226,13 @@ class DashboardService:
                                                                     json.dumps(report, ensure_ascii=False, allow_nan=False)))
                     db.commit()
             elif sample:
-                report = None
+                report = self._database_report(config, db)
             else:
                 stored = db.execute("SELECT payload FROM reports ORDER BY generated_at DESC LIMIT 1").fetchone()
                 report = json.loads(stored[0]) if stored else None
+                current_config = {k: v for k, v in config.items() if k != "directory"}
+                if report is None or report.get("config") != current_config or (datetime.now(TIMEZONE) - datetime.fromisoformat(report["generated_at"])).total_seconds() > 300:
+                    report = self._database_report(config, db)
 
             history = [] if sample else [
                 {"run_id": row[0], "generated_at": row[1], "total_action_amount": row[2]}
@@ -255,10 +267,18 @@ class DashboardService:
             "valuation_update_warnings": valuation_update_warnings,
         }
 
+    @staticmethod
+    def _database_report(config, db):
+        now = datetime.now(TIMEZONE)
+        return build_report(config, db, now, market_loader=lambda code, days, instant, cache:
+                            fetch_market(code, days, instant, cache, database_only=True))
+
     def add_trade(self, payload):
         config, sample = self._config()
         if sample:
-            raise ValueError("请先建立 etf_plans.toml，再登记真实成交")
+            raise ValueError("请先在配置管理保存个人计划，再登记真实成交" if self.configuration_store else "请先建立 etf_plans.toml，再登记真实成交")
+        if self.configuration_store:
+            config = self.configuration_store.config(include_disabled=True)
         plans = {plan["id"]: plan for plan in config["plans"]}
         plan_id = payload.get("plan_id")
         if plan_id not in plans:
@@ -285,7 +305,8 @@ class DashboardService:
             raise ValueError("无效的计划")
         plan = plans[plan_id]
         now = datetime.now(TIMEZONE)
-        loader = self.market_loader or fetch_market
+        loader = self.market_loader or (lambda code, days, instant, cache:
+                                       fetch_market(code, days, instant, cache, database_only=True))
         payload = loader(plan["code"], ETF_HISTORY_BARS, now,
                          config["directory"] / ".stock_cache" / "etf")
         fills = []
@@ -312,19 +333,35 @@ class DashboardService:
 
 class StockDashboardService:
     def __init__(self, loader=build_ma120_dashboard, history_loader=build_ma120_history,
-                 watchlist_path=None):
+                 watchlist_path=None, database_path=None):
         self.loader = loader
         self.history_loader = history_loader
         self.watchlist_path = watchlist_path
         self.snapshot = None
         self.lock = threading.Lock()
+        self.database_mode = loader is build_ma120_dashboard
+        self.store = MarketStore(database_path or database_for_cache(monitor.CACHE_DIR)) if self.database_mode or database_path else None
 
     def current(self):
+        if self.database_mode and self.snapshot is not None:
+            generated_at = datetime.fromisoformat(self.snapshot["generated_at"])
+            if (datetime.now(TIMEZONE) - generated_at).total_seconds() > 300:
+                self.snapshot = None
+        if self.snapshot is None:
+            if self.database_mode:
+                self.snapshot = build_ma120_dashboard(
+                    hist_loader=lambda code: monitor.get_stock_hist_data(code, database_only=True),
+                    quote_loader=lambda code: monitor.get_stock_realtime_quote(code, database_only=True))
+            elif self.store:
+                self.snapshot = self.store.get_dashboard("ma120")
         return {"snapshot": self.snapshot}
 
     def refresh(self):
         with self.lock:
-            self.snapshot = self.loader()
+            self.snapshot = (build_ma120_dashboard(hist_loader=lambda code:
+                             monitor.get_stock_hist_data(code, days=HISTORY_FETCH_BARS, force=True)) if self.database_mode else self.loader())
+            if self.store:
+                self.store.put_dashboard("ma120", self.snapshot)
             return {"snapshot": self.snapshot}
 
     def watchlist(self):
@@ -333,10 +370,17 @@ class StockDashboardService:
 
     def _change_watchlist(self, operation):
         with self.lock:
-            items = read_watchlist(self.watchlist_path)
-            updated = write_watchlist(operation(items), self.watchlist_path)
+            if self.watchlist_path is None:
+                updated = ConfigurationStore().mutate_stocks("watchlist", operation)
+            else:
+                items = read_watchlist(self.watchlist_path)
+                updated = write_watchlist(operation(items), self.watchlist_path)
             try:
-                self.snapshot = self.loader()
+                if self.database_mode:
+                    self.snapshot = None
+                    self.current()
+                else:
+                    self.snapshot = self.loader()
             except Exception as exc:
                 self.snapshot = None
                 return {"items": updated, "refresh_warning": f"关注池已保存，行情刷新失败：{exc}"}
@@ -378,22 +422,92 @@ class StockDashboardService:
     def history(self, code):
         if not code:
             raise ValueError("请选择股票")
-        snapshot = self.snapshot
+        snapshot = self.current()["snapshot"]
         if snapshot is None:
             raise ValueError("请先刷新 MA120 行情")
         item = next((row for row in snapshot.get("portfolio", []) + snapshot.get("watchlist", [])
                      if row.get("code") == code), None)
         if item is None:
             raise ValueError("股票不在当前持仓或关注池")
+        if self.history_loader is build_ma120_history:
+            return self.history_loader(code, item["name"], hist_loader=lambda code, days:
+                                       monitor.get_stock_hist_data(code, days, database_only=True))
         return self.history_loader(code, item["name"])
 
     def estimate(self, code, start_date):
         return estimate_ma120_profit(self.history(code), start_date)
 
 
+class ConfigurationService:
+    def __init__(self, store=None):
+        self.store = store or ConfigurationStore()
+
+    def current(self):
+        return self.store.summary()
+
+    def plan(self, payload, plan_id=None):
+        if not isinstance(payload, dict):
+            raise ValueError("计划格式无效")
+        allowed = {"id", "code", "name", "index_code", "strategy", "base_amount", "max_amount",
+                   "frequency", "weekday", "monthday", "cost", "shares", "enabled", "strategy_reason"}
+        if set(payload) - allowed:
+            raise ValueError("未知计划字段")
+        old = next((p for p in self.current()["etf"]["plans"] if p["id"] == plan_id), None) if plan_id else None
+        if plan_id and old is None:
+            raise LookupError("计划不存在")
+        candidate = {**(old or {}), **payload}
+        if not isinstance(candidate.get("index_code"), str):
+            raise ValueError("跟踪指数标识须为文字")
+        candidate["index_code"] = candidate["index_code"].strip().upper()
+        if not old:
+            candidate["id"] = candidate.get("id") or f"etf-{candidate['code']}"
+        candidate.setdefault("enabled", True)
+        candidate.setdefault("cost", 0)
+        candidate.setdefault("shares", 0)
+        if old and candidate["index_code"] != old["index_code"]:
+            candidate["valuation_csv"] = f"etf_valuations/{candidate['index_code']}.csv"
+        self.store.save_plan(candidate, plan_id)
+        return self.current()
+
+    def rules(self, payload):
+        if set(payload) != {"settings", "valuation", "ma120"}:
+            raise ValueError("规则需包含 settings、valuation、ma120")
+        self.store.save_rules(payload["settings"], payload["valuation"], payload["ma120"])
+        return self.current()
+
+    def position(self, payload, code=None):
+        new_code = normalize_code(code or payload.get("code"))
+        def update(items):
+            old = next((p for p in items if p["code"] == new_code), None)
+            if code and not old:
+                raise LookupError("持仓不存在")
+            if not code and old:
+                raise ValueError("持仓已存在，请编辑")
+            candidate = {**(old or {}), **payload, "code": new_code}
+            if code and payload.get("code", new_code) != new_code:
+                raise ValueError("持仓代码不能更换")
+            return [p for p in items if p["code"] != new_code] + [candidate]
+        self.store.mutate_stocks("portfolio", update)
+        return self.current()
+
+    def remove_position(self, code):
+        code = normalize_code(code)
+        def remove(items):
+            if not any(p["code"] == code for p in items):
+                raise LookupError("持仓不存在")
+            return [p for p in items if p["code"] != code]
+        self.store.mutate_stocks("portfolio", remove)
+        return self.current()
+
+    def disable(self, plan_id):
+        self.store.disable_plan(plan_id)
+        return self.current()
+
+
 class DashboardHandler(BaseHTTPRequestHandler):
     service = DashboardService()
     stock_service = StockDashboardService()
+    configuration_service = ConfigurationService()
 
     def _json(self, status, data):
         body = json.dumps(data, ensure_ascii=False, allow_nan=False).encode("utf-8")
@@ -406,6 +520,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def _static(self, path):
         assets = {"/": ("index.html", "text/html"), "/app.css": ("app.css", "text/css"),
+                  "/configuration": ("configuration.html", "text/html"),
+                  "/configuration.js": ("configuration.js", "text/javascript"),
+                  "/configuration.css": ("configuration.css", "text/css"),
                   "/app.js": ("app.js", "text/javascript"),
                   "/ma120": ("ma120.html", "text/html"),
                   "/ma120/": ("ma120.html", "text/html"),
@@ -432,12 +549,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         parsed = urlsplit(self.path)
         path = parsed.path
-        if path not in ("/api/dashboard", "/api/history", "/api/estimate", "/api/ma120",
+        if path not in ("/api/dashboard", "/api/history", "/api/estimate", "/api/ma120", "/api/configuration",
                         "/api/ma120/history", "/api/ma120/estimate", "/api/ma120/watchlist"):
             self._static(path)
             return
         try:
-            if path == "/api/ma120":
+            if path == "/api/configuration":
+                self._json(200, self.configuration_service.current())
+            elif path == "/api/ma120":
                 self._json(200, self.stock_service.current())
             elif path == "/api/ma120/watchlist":
                 self._json(200, self.stock_service.watchlist())
@@ -494,17 +613,30 @@ class DashboardHandler(BaseHTTPRequestHandler):
             raise ValueError("请指定唯一股票代码")
         return values[0]
 
+    @staticmethod
+    def _configuration_id(query):
+        values = parse_qs(query).get("id", [])
+        if len(values) != 1 or not values[0]:
+            raise ValueError("请指定唯一计划 ID")
+        return values[0]
+
     def do_POST(self):
         if not self._mutation_allowed():
             return
         path = urlsplit(self.path).path
         if path not in ("/api/refresh", "/api/trades", "/api/ma120/refresh",
-                        "/api/ma120/watchlist"):
+                        "/api/ma120/watchlist", "/api/configuration/plans", "/api/configuration/portfolio", "/api/configuration/rules"):
             self.send_error(404)
             return
         try:
             payload = self._read_json()
-            if path == "/api/ma120/refresh":
+            if path == "/api/configuration/plans":
+                result = self.configuration_service.plan(payload)
+            elif path == "/api/configuration/portfolio":
+                result = self.configuration_service.position(payload)
+            elif path == "/api/configuration/rules":
+                result = self.configuration_service.rules(payload)
+            elif path == "/api/ma120/refresh":
                 result = self.stock_service.refresh()
             elif path == "/api/ma120/watchlist":
                 result = self.stock_service.add_watchlist(payload)
@@ -512,6 +644,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 result = self.service.dashboard(refresh=True)
             else:
                 result = self.service.add_trade(payload)
+            if path.startswith("/api/configuration/"):
+                self.stock_service.snapshot = None
             self._json(200, result)
         except TypeError as exc:
             self._json(415, {"error": str(exc)})
@@ -524,12 +658,18 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if not self._mutation_allowed():
             return
         parsed = urlsplit(self.path)
-        if parsed.path != "/api/ma120/watchlist":
+        if parsed.path not in ("/api/ma120/watchlist", "/api/configuration/plans", "/api/configuration/portfolio"):
             self.send_error(404)
             return
         try:
-            result = self.stock_service.rename_watchlist(
-                self._watchlist_code(parsed.query), self._read_json())
+            if parsed.path == "/api/configuration/plans":
+                result = self.configuration_service.plan(self._read_json(), self._configuration_id(parsed.query))
+            elif parsed.path == "/api/configuration/portfolio":
+                result = self.configuration_service.position(self._read_json(), self._watchlist_code(parsed.query))
+            else:
+                result = self.stock_service.rename_watchlist(self._watchlist_code(parsed.query), self._read_json())
+            if parsed.path.startswith("/api/configuration/"):
+                self.stock_service.snapshot = None
             self._json(200, result)
         except TypeError as exc:
             self._json(415, {"error": str(exc)})
@@ -544,14 +684,21 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if not self._mutation_allowed():
             return
         parsed = urlsplit(self.path)
-        if parsed.path != "/api/ma120/watchlist":
+        if parsed.path not in ("/api/ma120/watchlist", "/api/configuration/plans", "/api/configuration/portfolio"):
             self.send_error(404)
             return
         try:
             if int(self.headers.get("Content-Length", "0")) != 0:
                 raise ValueError("删除请求不接受正文")
-            self._json(200, self.stock_service.remove_watchlist(
-                self._watchlist_code(parsed.query)))
+            if parsed.path == "/api/configuration/plans":
+                result = self.configuration_service.disable(self._configuration_id(parsed.query))
+            elif parsed.path == "/api/configuration/portfolio":
+                result = self.configuration_service.remove_position(self._watchlist_code(parsed.query))
+            else:
+                result = self.stock_service.remove_watchlist(self._watchlist_code(parsed.query))
+            if parsed.path.startswith("/api/configuration/"):
+                self.stock_service.snapshot = None
+            self._json(200, result)
         except LookupError as exc:
             self._json(404, {"error": str(exc)})
         except ValueError as exc:

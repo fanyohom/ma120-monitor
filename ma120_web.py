@@ -46,7 +46,7 @@ def build_ma120_history(code, name, hist_loader=None, now=None):
     if len(bars) < monitor.MA_LONG + 1:
         raise ValueError(f"已完成日 K 不足 {monitor.MA_LONG + 1} 根")
     latest_day = bars.index[-1].date()
-    if (today - latest_day).days > 15:
+    if (today - latest_day).days > 15 and history.attrs.get("read_source") != "database":
         raise ValueError(f"历史日 K 已过期：最新日期 {latest_day.isoformat()}")
     closes = pd.to_numeric(bars["close"], errors="coerce")
     if not closes.map(lambda value: value is not None and math.isfinite(value) and value > 0).all():
@@ -80,6 +80,7 @@ def build_ma120_history(code, name, hist_loader=None, now=None):
     start = series[0]["date"]
     signals = [point for point in signals if point["date"] >= start]
     return {"code": code, "name": name,
+            "strategy": {"ma_days": monitor.MA_LONG, "buy_factor": monitor.BUY_THRESHOLD, "sell_factor": monitor.SELL_THRESHOLD},
             "currency": "HKD" if monitor._is_hk_code(code) else "CNY",
             "window_start": start, "window_end": series[-1]["date"],
             "series": series, "signals": signals,
@@ -162,6 +163,8 @@ def _row(item, *, portfolio, hist_loader, quote_loader, today):
         "zone": None,
         "status": "数据不足",
         "error": None,
+        "read_source": None,
+        "data_stale": False,
     }
     if portfolio:
         row.update({
@@ -180,12 +183,18 @@ def _row(item, *, portfolio, hist_loader, quote_loader, today):
             return row
         history = history.sort_index()
         last_day = history.index[-1].date()
+        row["read_source"] = history.attrs.get("read_source", "provider")
         row["last_close_date"] = last_day.isoformat()
         if last_day > today:
             row["status"] = "日期异常"
             row["error"] = f"最新日 K 日期 {last_day} 晚于今天"
             return row
-        if (today - last_day).days > 15:
+        history_stale = bool(history.attrs.get("data_stale") or (today - last_day).days > 15)
+        if (today - last_day).days > 15 and row["read_source"] != "database":
+            row["status"] = "行情过期"
+            row["error"] = f"最新日 K 日期 {last_day} 距今超过 15 天"
+            return row
+        if (today - last_day).days > 15 and row["read_source"] != "database":
             row["status"] = "行情过期"
             row["error"] = f"最新日 K 日期 {last_day} 距今超过 15 天"
             return row
@@ -207,7 +216,7 @@ def _row(item, *, portfolio, hist_loader, quote_loader, today):
             valid_quote_date = parsed_quote_date == today and parsed_quote_date >= last_day
         except ValueError:
             valid_quote_date = False
-        use_quote = quote_price is not None and valid_quote_date
+        use_quote = quote_price is not None and valid_quote_date and not quote.get("data_stale")
         signal = monitor.check_ma120_signal(history, current_price=quote_price if use_quote else None)
         if signal is None or not all(math.isfinite(float(signal[key])) for key in
                                      ("price", "ma120", "ma120_pct", "buy_line", "sell_line")):
@@ -215,9 +224,9 @@ def _row(item, *, portfolio, hist_loader, quote_loader, today):
             return row
 
         today_signal = None
-        if last_day == today and signal["signal"] in ("buy", "sell"):
+        if not history_stale and last_day == today and signal["signal"] in ("buy", "sell"):
             today_signal = signal["signal"]
-        elif use_quote and last_day < today:
+        elif not history_stale and use_quote and last_day < today:
             buy_threshold = signal["ma120"] * monitor.BUY_THRESHOLD
             sell_threshold = signal["ma120"] * monitor.SELL_THRESHOLD
             if signal["price"] < buy_threshold <= last_close:
@@ -243,6 +252,10 @@ def _row(item, *, portfolio, hist_loader, quote_loader, today):
         else:
             row["zone"] = "between"
         row["status"] = monitor._card_status({**signal, "signal": row["signal"] or "hold"})
+        row["data_stale"] = bool(history_stale or quote.get("data_stale"))
+        if row["data_stale"]:
+            row["status"] = "数据库历史行情"
+            row["signal"] = None
 
         if portfolio and row["shares"] is not None:
             row["market_value"] = round(row["price"] * row["shares"], 2)

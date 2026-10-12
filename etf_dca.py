@@ -20,6 +20,7 @@ from stock_dynamic_monitor import _display_width, _pad, send_feishu
 BASE_DIR = Path(__file__).resolve().parent
 STRATEGIES = {"ma": "均线定投", "valuation": "估值定投", "drawdown": "涨跌幅定投"}
 STATUSES = {
+    "stored": "数据库历史行情",
     "buy": "计划买入", "pause": "暂停定投", "wait": "未到定投日",
     "recorded": "本期已买入", "market_closed": "无当日交易行情",
     "blocked": "数据待补", "small": "不足一手", "compare": "仅供对比",
@@ -34,7 +35,10 @@ def number(value, label, minimum=0):
     return value
 
 
-def load_config(path: Path) -> dict:
+def load_config(path: Path | None = None) -> dict:
+    if path is None:
+        from config_store import ConfigurationStore
+        return ConfigurationStore().config()
     with path.open("rb") as stream:
         config = tomllib.load(stream)
     if config.get("version") != 1 or not config.get("plans"):
@@ -244,6 +248,9 @@ def build_report(config, db, now, market_loader=fetch_market):
                     row["status"] = "compare"
                 elif bought:
                     row["status"] = "recorded"
+                elif market.get("data_stale"):
+                    row["status"] = "stored"
+                    row["reason"] += f" / 历史数据 {market['quote_at'][:10]}，暂停买入提示"
                 elif not market["tradable"]:
                     row["status"] = "market_closed"
                 elif not due:
@@ -261,7 +268,7 @@ def build_report(config, db, now, market_loader=fetch_market):
                 row["reason"] = str(exc)
             rows.append(row)
     priorities = {"buy": 0, "blocked": 1, "pause": 2, "small": 3, "recorded": 4,
-                  "wait": 5, "market_closed": 6, "compare": 7}
+                  "wait": 5, "market_closed": 6, "stored": 6, "compare": 7}
     rows.sort(key=lambda row: (not row["selected"], priorities[row["status"]], row["plan_id"], row["strategy"]))
     return {"run_id": uuid.uuid4().hex, "generated_at": now.isoformat(),
             "mode": "recommendations_only", "config": {k: v for k, v in config.items() if k != "directory"},
@@ -295,7 +302,7 @@ def render_text(report, compare=False):
     rows = display_rows(report, compare)
     lines = [f"ETF 定投建议 | {report['generated_at']}",
              f"生效计划预算: {report['total_action_amount']:.2f} 元 / 整手估算: {report['total_action_cost']:.2f} 元 (未含佣金；对比策略不累计；未下单)"]
-    widths = {key: max(_display_width(label), *(_display_width(row[key]) for row in rows))
+    widths = {key: max([_display_width(label)] + [_display_width(row[key]) for row in rows])
               for key, label in COLUMNS}
     lines.append(" | ".join(_pad(label, widths[key]) for key, label in COLUMNS))
     lines.append("-+-".join("-" * widths[key] for key, _ in COLUMNS))
@@ -325,7 +332,7 @@ def render_card(report, compare=False):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", type=Path, default=BASE_DIR / "etf_plans.toml")
+    parser.add_argument("--config", type=Path, help="Explicit legacy TOML override; default reads SQLite")
     parser.add_argument("--compare", action="store_true", help="Show all three alternatives per ETF")
     parser.add_argument("--feishu", action="store_true", help="Send the preview to the configured webhook")
     parser.add_argument("--record-trade", metavar="PLAN_ID", help="Record an actual fill; does not place an order")
@@ -342,6 +349,9 @@ def main(argv=None):
         output = config["directory"] / "dca_results"
         with closing(open_journal(output / "journal.sqlite3")) as db:
             if args.record_trade:
+                if args.config is None:
+                    from config_store import ConfigurationStore
+                    config["plans"] = ConfigurationStore().config(include_disabled=True)["plans"]
                 plans = {plan["id"]: plan for plan in config["plans"]}
                 if args.record_trade not in plans:
                     raise ValueError("Unknown PLAN_ID")

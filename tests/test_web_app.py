@@ -69,6 +69,7 @@ class DashboardServiceTests(unittest.TestCase):
             self.service.dashboard(refresh=True)
         self.assertEqual(fetch.call_count, 4)
         self.assertTrue(all(call.kwargs["force"] for call in fetch.call_args_list))
+        self.assertTrue(all(call.args[1] >= 5000 for call in fetch.call_args_list))
 
     def test_refresh_updates_selected_csi300_valuation_before_report(self):
         template = Path(__file__).resolve().parents[1] / "etf_plans.example.toml"

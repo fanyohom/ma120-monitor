@@ -227,6 +227,12 @@ function rowsForScope() {
 }
 
 function renderSummary() {
+  const maDays = dashboard.strategy?.ma_days || 120;
+  document.querySelectorAll('[data-stock-ma-label]').forEach((node) => { node.textContent = `MA${maDays}`; });
+  document.querySelectorAll('[data-stock-deviation-label]').forEach((node) => { node.textContent = `偏离 MA${maDays}`; });
+  $('stockRulePill').textContent = `MA${maDays} × ${dashboard.strategy?.buy_factor ?? 0.88} / ${dashboard.strategy?.sell_factor ?? 1.12}`;
+  $('stockBuyLegend').textContent = `买入线 ${dashboard.strategy?.buy_factor ?? 0.88}×MA`;
+  $('stockSellLegend').textContent = `卖出线 ${dashboard.strategy?.sell_factor ?? 1.12}×MA`;
   const summary = dashboard.summary;
   $('stockPositionSummary').hidden = summary.portfolio_count === 0;
   $('portfolioCount').textContent = summary.portfolio_count;
@@ -250,8 +256,10 @@ function renderSummary() {
     $('pnlCoverage').textContent = summary.pnl_coverage ? `已计成本 ${summary.pnl_coverage} / ${summary.portfolio_count} 只 · ${signed(summary.unrealized_pnl_pct)}` : '尚无有效持仓成本与份额';
   }
   $('stockUpdated').textContent = `最近测算 ${dashboard.generated_at.replace('T', ' ').slice(0, 19)} · 未下单`;
+  const historical = [...dashboard.portfolio, ...dashboard.watchlist].filter((row) => row.data_stale).length;
   if (dashboard.source_error) notice(`股票清单读取异常：${dashboard.source_error}`, true);
-  else notice(summary.data_unavailable ? `${summary.data_unavailable} 只股票的行情或均线数据待补；其余结果可查看。` : '');
+  else notice([summary.data_unavailable ? `${summary.data_unavailable} 只股票的行情或均线数据待补；其余结果可查看。` : '',
+    historical ? `${historical} 只显示数据库历史行情，数据日期见各行；刷新可更新，旧数据不生成今日信号。` : ''].filter(Boolean).join(' '));
 }
 
 function renderRows() {
@@ -460,10 +468,10 @@ function drawStockChart(history) {
     heading.textContent = point.date;
     tooltip.append(heading);
     field('收盘价', amount(point.close, history.currency));
-    field('MA120', amount(point.ma120, history.currency));
+    field(`MA${history.strategy?.ma_days || 120}`, amount(point.ma120, history.currency));
     field('买入线', amount(point.buy_line, history.currency));
     field('卖出线', amount(point.sell_line, history.currency));
-    field('偏离 MA120', signed((point.close / point.ma120 - 1) * 100));
+    field(`偏离 MA${history.strategy?.ma_days || 120}`, signed((point.close / point.ma120 - 1) * 100));
     if (index > 0) field('较前日', signed((point.close / points[index - 1].close - 1) * 100));
     field('模拟信号', point.signal === 'buy' ? 'B · 首次跌破买入线' : point.signal === 'sell' ? 'S · 首次突破卖出线' : '无');
     tooltip.hidden = false;
@@ -472,7 +480,7 @@ function drawStockChart(history) {
     const left = px < shell.clientWidth / 2 ? px + 14 : px - tooltip.offsetWidth - 14;
     tooltip.style.left = `${Math.max(8, Math.min(left, shell.clientWidth-tooltip.offsetWidth-8))}px`;
     tooltip.style.top = `${Math.max(8, Math.min(py-tooltip.offsetHeight-12, shell.clientHeight-tooltip.offsetHeight-8))}px`;
-    shell.setAttribute('aria-label', `${point.date}，收盘价 ${number(point.close)}，MA120 ${number(point.ma120)}，模拟信号 ${point.signal || '无'}`);
+    shell.setAttribute('aria-label', `${point.date}，收盘价 ${number(point.close)}，MA${history.strategy?.ma_days || 120} ${number(point.ma120)}，模拟信号 ${point.signal || '无'}`);
   }
 
   function nearestIndex(event) {
@@ -725,5 +733,5 @@ window.addEventListener('resize', () => {
   if (cached && !$('stockDetail').hidden) drawStockChart(cached);
 });
 applyRoute();
-request('/api/ma120').then((result) => { if (result.snapshot) render(result.snapshot); else refresh(); })
+request('/api/ma120').then((result) => { if (result.snapshot) render(result.snapshot); else notice('数据库暂无行情，请点击刷新行情获取数据。', true); })
   .catch((error) => { notice(`读取失败：${error.message}`, true); showInitialDetailError(error.message); });

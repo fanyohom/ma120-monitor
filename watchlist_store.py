@@ -52,6 +52,9 @@ def _validate_items(items):
 
 
 def read_watchlist(path=None):
+    if path is None:
+        from config_store import ConfigurationStore
+        return ConfigurationStore().stocks("watchlist")
     path = Path(path) if path is not None else DEFAULT_PATH
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
@@ -67,6 +70,9 @@ def read_watchlist(path=None):
 
 
 def write_watchlist(items, path=None, *, create_only=False):
+    if path is None:
+        from config_store import ConfigurationStore
+        return ConfigurationStore().mutate_stocks("watchlist", lambda _: _validate_items(items))
     path = Path(path) if path is not None else DEFAULT_PATH
     normalized = _validate_items(items)
     path.parent.mkdir(parents=True, exist_ok=True)

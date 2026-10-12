@@ -9,9 +9,19 @@ from unittest.mock import Mock, patch
 import pandas as pd
 
 import stock_dynamic_monitor as monitor
+from pathlib import Path
+from market_store import MarketStore
 
 
 class MarketDataTests(unittest.TestCase):
+    def setUp(self):
+        self.database_folder = tempfile.TemporaryDirectory()
+        self.addCleanup(self.database_folder.cleanup)
+        self.store_patch = patch("stock_dynamic_monitor._market_store", return_value=MarketStore(
+            Path(self.database_folder.name) / "market.sqlite3"))
+        self.store_patch.start()
+        self.addCleanup(self.store_patch.stop)
+
     @patch("stock_dynamic_monitor.requests.get")
     @patch("stock_dynamic_monitor._write_cache")
     @patch("stock_dynamic_monitor._read_cache")
