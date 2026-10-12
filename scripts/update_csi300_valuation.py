@@ -30,11 +30,8 @@ def years_ago(day: date, years: int) -> date:
 
 
 def valuation_settings() -> dict:
-    config = BASE_DIR / "etf_plans.toml"
-    if not config.exists():
-        config = BASE_DIR / "etf_plans.example.toml"
-    with config.open("rb") as handle:
-        return tomllib.load(handle)["valuation"]
+    from config_store import ConfigurationStore
+    return ConfigurationStore().config()["valuation"]
 
 
 def fetch_history(start: date, end: date) -> dict:

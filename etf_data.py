@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pandas as pd
 import requests
+from market_store import MarketStore, database_for_cache, database_for_valuation
 
 
 class DataError(ValueError):
@@ -40,9 +41,8 @@ def parse_history(rows: list) -> pd.Series:
 def _fetch_daily_history(symbol: str, days: int, adjustment: str, as_of: date) -> list:
     field = "qfqday" if adjustment else "day"
     rows = []
-    # Tencent can append an extra live anchor bar when end is blank, making an
-    # 800-row qfq request return 801 rows. An explicit as-of date keeps qfq/raw
-    # pagination aligned while retaining strict response-size validation.
+    # The caller requests completed days only. Tencent can append a live bar
+    # even with an explicit current-day end, and qfq/raw can update separately.
     end = as_of.isoformat()
     while len(rows) < days:
         page_size = min(800, days - len(rows))
@@ -84,27 +84,57 @@ def _fetch_daily_history(symbol: str, days: int, adjustment: str, as_of: date) -
     return rows
 
 
-def fetch_market(code: str, days: int, now: datetime, cache_dir: Path, force: bool = False) -> dict:
-    """Keep dated snapshots; reuse only a complete snapshot from the last 5 minutes."""
+def fetch_market(code: str, days: int, now: datetime, cache_dir: Path, force: bool = False,
+                 database_only: bool = False) -> dict:
+    """Read durable history; explicit refresh saves a new complete version."""
     if days < 1:
         raise DataError("ETF history length must be positive")
     symbol = etf_symbol(code)
+    store = MarketStore(database_for_cache(cache_dir))
+    stored = store.get_history("etf", code, min_rows=days) or store.get_history("etf", code, longest=True)
+    if stored is not None:
+        age = (now - datetime.fromisoformat(stored["fetched_at"])).total_seconds()
+        if database_only or (not force and 0 <= age <= 300 and stored["requested_days"] >= days):
+            stored["data_stale"] = not 0 <= age <= 300
+            return stored
+    if database_only:
+        raise DataError("数据库尚无该 ETF 行情，请刷新数据")
     folder = cache_dir / now.date().isoformat()
-    if not force:
+    if stored is None and not force:
         for path in sorted(folder.glob(f"{code}_*.json"), reverse=True):
             try:
                 payload = json.loads(path.read_text(encoding="utf-8"))
                 age = (now - datetime.fromisoformat(payload["fetched_at"])).total_seconds()
                 if 0 <= age <= 300 and payload["requested_days"] >= days:
+                    save_market(store, code, payload)
                     return payload
             except (ValueError, TypeError, KeyError, OSError):
                 continue
 
+    try:
+        payload = _fetch_market_online(symbol, code, days, now)
+        save_market(store, code, payload)
+        return payload
+    except (OSError, ValueError, KeyError, IndexError) as exc:
+        if stored is None:
+            raise
+        return {**stored, "data_stale": True, "refresh_error": str(exc)}
+
+
+def save_market(store, code, payload):
+    metadata = {key: value for key, value in payload.items() if key not in ("qfq", "raw")}
+    store.put_history("etf", code, {key: payload[key] for key in ("qfq", "raw")},
+                      metadata, payload["fetched_at"])
+    store.put_quote("etf", code, {key: payload[key] for key in ("price", "quote_at", "volume", "source")},
+                    payload["fetched_at"])
+
+
+def _fetch_market_online(symbol, code, days, now):
     histories = {}
     for adjustment in ("qfq", ""):
         # A raw series must never silently stand in for adjusted prices.
         histories["qfq" if adjustment else "raw"] = _fetch_daily_history(
-            symbol, days, adjustment, now.date()
+            symbol, days, adjustment, now.date() - timedelta(days=1)
         )
     if [row[0] for row in histories["qfq"]] != [row[0] for row in histories["raw"]]:
         raise DataError("Adjusted/raw ETF history dates disagree")
@@ -120,9 +150,6 @@ def fetch_market(code: str, days: int, now: datetime, cache_dir: Path, force: bo
         "quote_at": quote_at.isoformat(), "price": positive(fields[3], "price"),
         "volume": float(fields[6]), **histories,
     }
-    folder.mkdir(parents=True, exist_ok=True)
-    path = folder / f"{code}_{now.strftime('%H%M%S_%f')}.json"
-    path.write_text(json.dumps(payload, ensure_ascii=False, allow_nan=False), encoding="utf-8")
     return payload
 
 
@@ -134,8 +161,8 @@ def market_metrics(payload: dict, ma_days: int, now: datetime) -> dict:
         raise DataError("ETF history includes future dates")
     if qfq.index.max() != raw.index.max():
         raise DataError("Adjusted/raw history end dates disagree")
-    # Today's two close snapshots can differ between requests. Open is fixed intraday
-    # and also carries today's adjustment factor on ex-distribution/split dates.
+    # Use the latest common bar's open to align the two price scales; cached
+    # snapshots from earlier versions may also contain a still-changing live close.
     anchor = qfq.index.max()
     anchor_date = anchor.date().isoformat()
     adjusted_open = next(row[1] for row in payload["qfq"] if row[0] == anchor_date)
@@ -144,8 +171,7 @@ def market_metrics(payload: dict, ma_days: int, now: datetime) -> dict:
     completed = qfq[qfq.index < today]
     if completed.empty:
         raise DataError("No completed ETF bars")
-    if (now.date() - completed.index[-1].date()).days > 15:
-        raise DataError("ETF daily history is stale")
+    history_stale = (now.date() - completed.index[-1].date()).days > 15
     quote_at = datetime.fromisoformat(payload["quote_at"])
     if quote_at > now + timedelta(minutes=5):
         raise DataError("Quote timestamp is in the future")
@@ -157,7 +183,8 @@ def market_metrics(payload: dict, ma_days: int, now: datetime) -> dict:
     recent = (now - quote_at).total_seconds() <= 600 if in_session else quote_clock >= (895 if clock > 900 else 685)
     tradable = (now.weekday() < 5 and quote_at.date() == now.date()
                 and (quote_at.hour, quote_at.minute) >= (9, 30)
-                and float(payload["volume"]) > 0 and recent)
+                and float(payload["volume"]) > 0 and recent
+                and not payload.get("data_stale") and not history_stale)
     return {
         "price": price, "quote_at": payload["quote_at"], "ma": ma,
         "ma_days": ma_days, "ma_date": completed.index[-1].date().isoformat(),
@@ -165,29 +192,57 @@ def market_metrics(payload: dict, ma_days: int, now: datetime) -> dict:
         "ma_error": "" if ma else f"MA{ma_days} needs {ma_days} completed bars; got {len(completed)}",
         "tradable": tradable, "source": payload["source"],
         "fetched_at": payload.get("fetched_at", ""),
+        "read_source": payload.get("read_source", "provider"),
+        "data_stale": bool(payload.get("data_stale") or history_stale),
+        "refresh_error": payload.get("refresh_error", ""),
     }
 
 
 def valuation_metrics(path: Path, index_code: str, as_of: date, settings: dict) -> dict:
     """CSV uses only published observations available by as_of; no future-data leakage."""
+    frame = load_valuation_history(path, index_code)
+    return calculate_valuation(frame, path, index_code, as_of, settings)
+
+
+def load_valuation_history(path: Path, index_code: str, database_path=None) -> pd.DataFrame:
+    path = Path(path)
+    store = MarketStore(database_path or database_for_valuation(path))
+    series_key = str(path.resolve())
     if not path.exists():
-        raise DataError(f"Missing valuation CSV: {path.name}")
-    frame = pd.read_csv(path, dtype={"index_code": str})
+        stored = store.get_valuations(series_key, index_code)
+        if stored is None:
+            raise DataError(f"Missing valuation CSV: {path.name} (数据库也无对应记录)")
+        frame = pd.DataFrame(stored)
+    else:
+        frame = pd.read_csv(path, dtype={"index_code": str})
     required = {"date", "available_date", "index_code", "pe_ttm"}
     if not required.issubset(frame.columns):
         raise DataError("Valuation CSV needs date,available_date,index_code,pe_ttm")
     frame = frame[frame["index_code"] == index_code].copy()
     frame["date"] = pd.to_datetime(frame["date"], format="%Y-%m-%d", errors="raise")
     frame["available_date"] = pd.to_datetime(frame["available_date"], format="%Y-%m-%d", errors="raise")
+    if frame["date"].isna().any() or frame["available_date"].isna().any():
+        raise DataError("Invalid valuation or publication date")
+    if frame["date"].isna().any() or frame["available_date"].isna().any():
+        raise DataError("Invalid valuation or publication date")
     if (frame["available_date"] < frame["date"]).any() or frame["date"].duplicated().any():
         raise DataError("Invalid publication dates or duplicate valuation dates")
+    frame["pe_ttm"] = frame["pe_ttm"].map(lambda value: positive(value, "pe_ttm"))
+    if not frame.empty:
+        records = [{"date": row.date.date().isoformat(),
+                    "available_date": row.available_date.date().isoformat(), "pe_ttm": row.pe_ttm}
+                   for row in frame.itertuples()]
+        store.put_valuations(series_key, index_code, records)
+    return frame
+
+
+def calculate_valuation(frame, path, index_code, as_of, settings):
     cutoff = pd.Timestamp(as_of)
     start = cutoff - pd.DateOffset(years=settings["lookback_years"])
     frame = frame[(frame["date"] <= cutoff) & (frame["date"] >= start)
                   & (frame["available_date"] <= cutoff)].sort_values("date")
     if frame.empty:
         raise DataError("No available index valuation observations")
-    frame["pe_ttm"] = frame["pe_ttm"].map(lambda value: positive(value, "pe_ttm"))
     latest = frame.iloc[-1]
     if (cutoff - latest["date"]).days > settings["max_age_days"]:
         raise DataError("Index valuation is stale")

@@ -2,8 +2,8 @@
 MA120 持仓 & 关注池监控（Sina 数据源）
 
 数据：
-  - portfolio.json：持仓、成本价、持仓数量
-  - watchlist.json：关注池股票代码和名称
+  - SQLite portfolio_positions：持仓、成本价、持仓数量
+  - SQLite watchlist_entries：关注池股票代码和名称
 
 策略：
   - 买入线：MA120 × 0.88
@@ -26,11 +26,14 @@ import time
 import unicodedata
 import warnings
 from datetime import datetime
+from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import requests
 from portfolio_store import PortfolioError, read_portfolio
 from watchlist_store import read_watchlist
+from market_store import MarketStore, database_for_cache
 
 warnings.filterwarnings("ignore")
 
@@ -134,11 +137,25 @@ def _read_xlsx_rows(path: str, sheet: str) -> list:
 
 
 def load_portfolio() -> list:
-    return read_portfolio(PORTFOLIO_JSON)
+    if Path(PORTFOLIO_JSON) != Path(BASE_DIR) / "portfolio.json":
+        return read_portfolio(PORTFOLIO_JSON)
+    _load_strategy_settings()
+    return read_portfolio()
 
 
 def load_watchlist() -> list:
-    return read_watchlist(WATCHLIST_JSON)
+    if Path(WATCHLIST_JSON) != Path(BASE_DIR) / "watchlist.json":
+        return read_watchlist(WATCHLIST_JSON)
+    _load_strategy_settings()
+    return read_watchlist()
+
+
+def _load_strategy_settings():
+    from config_store import ConfigurationStore
+    global MA_LONG, BUY_THRESHOLD, SELL_THRESHOLD, DATA_DAYS
+    settings = ConfigurationStore().summary()["ma120"]
+    MA_LONG, BUY_THRESHOLD, SELL_THRESHOLD, DATA_DAYS = (
+        settings["ma_days"], settings["buy_factor"], settings["sell_factor"], settings["history_days"])
 
 
 # ---------- K 线获取 ----------
@@ -154,12 +171,37 @@ def _is_cache_fresh(path: str) -> bool:
     return time.time() - os.path.getmtime(path) <= CACHE_DAYS * 86400
 
 
-def _read_cache(code: str) -> pd.DataFrame | None:
+def _market_store():
+    return MarketStore(database_for_cache(CACHE_DIR))
+
+
+def _history_frame(payload):
+    rows = payload["bars"]
+    frame = pd.DataFrame([row[:6] for row in rows], columns=["date", "open", "close", "high", "low", "volume"])
+    frame["date"] = pd.to_datetime(frame["date"])
+    frame = frame.set_index("date").sort_index()
+    for column in ["open", "close", "high", "low", "volume"]:
+        frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    frame.attrs.update({"fetched_at": payload["fetched_at"], "read_source": "database"})
+    return frame
+
+
+def _read_cache(code: str, allow_stale: bool = False) -> pd.DataFrame | None:
+    store = _market_store()
+    payload = store.get_history("stock", code)
+    if payload is not None:
+        fresh = datetime.fromisoformat(payload["fetched_at"]).date() == datetime.now().date()
+        if fresh or allow_stale:
+            frame = _history_frame(payload)
+            frame.attrs["data_stale"] = not fresh
+            return frame
+        return None
     path = _cache_path(code)
     if not os.path.exists(path):
         return None
     try:
-        if not _is_cache_fresh(path):
+        fresh = _is_cache_fresh(path)
+        if not fresh and not allow_stale:
             return None
         with open(path, encoding="utf-8") as f:
             cached = json.load(f)
@@ -168,30 +210,43 @@ def _read_cache(code: str) -> pd.DataFrame | None:
         df = df.set_index("date").sort_index()
         for col in ["open", "high", "low", "close", "volume"]:
             df[col] = pd.to_numeric(df[col], errors="coerce")
+        fetched_at = datetime.fromtimestamp(os.path.getmtime(path), ZoneInfo("Asia/Shanghai")).isoformat()
+        _write_cache(code, df, fetched_at=fetched_at)
+        df.attrs.update({"data_stale": not fresh, "fetched_at": fetched_at, "read_source": "database"})
         return df
     except Exception:
         return None
 
 
-def _write_cache(code: str, df: pd.DataFrame) -> None:
-    try:
-        os.makedirs(CACHE_DIR, exist_ok=True)
-        data = df.reset_index().to_dict("records")
-        for item in data:
-            item["date"] = item["date"].isoformat()
-        with open(_cache_path(code), "w", encoding="utf-8") as f:
-            json.dump({"data": data}, f, ensure_ascii=False)
-    except Exception:
-        pass
+def _write_cache(code: str, df: pd.DataFrame, fetched_at=None) -> None:
+    rows = [[stamp.isoformat(), float(row["open"]), float(row["close"]),
+             float(row["high"]), float(row["low"]), float(row["volume"])]
+            for stamp, row in df.iterrows()]
+    source = "Tencent qfq" if _is_hk_code(code) else "Sina daily"
+    _market_store().put_history("stock", code, {"bars": rows}, {"source": source}, fetched_at)
 
 
-def get_stock_hist_data(stock_code: str, days: int = DATA_DAYS) -> pd.DataFrame:
+def get_stock_hist_data(stock_code: str, days: int | None = None, force: bool = False,
+                        database_only: bool = False) -> pd.DataFrame:
     """获取前复权日 K：A 股使用新浪，港股使用腾讯。"""
-    cached = _read_cache(stock_code)
+    days = DATA_DAYS if days is None else days
+    cached = _read_cache(stock_code, allow_stale=True) if database_only else _read_cache(stock_code)
+    if database_only and cached is not None:
+        cached.attrs["data_stale"] = True
     required_rows = MA_LONG if days <= DATA_DAYS else days
-    if cached is not None and len(cached) >= required_rows:
+    if cached is not None and len(cached) >= required_rows and not force:
         return cached
-    fallback = cached if cached is not None and len(cached) >= MA_LONG else pd.DataFrame()
+    fallback = cached if cached is not None else _read_cache(stock_code, allow_stale=True)
+    fallback = fallback if fallback is not None and len(fallback) >= MA_LONG else pd.DataFrame()
+    if database_only:
+        if len(fallback) < days:
+            deeper = _market_store().get_history("stock", stock_code, min_rows=days)
+            if deeper:
+                fallback = _history_frame(deeper)
+                fallback.attrs["data_stale"] = True
+        return fallback
+    if not fallback.empty:
+        fallback.attrs["data_stale"] = True
 
     try:
         if _is_hk_code(stock_code):
@@ -237,11 +292,13 @@ def get_stock_hist_data(stock_code: str, days: int = DATA_DAYS) -> pd.DataFrame:
         _write_cache(stock_code, df)
         return df
     except Exception:
+        if not fallback.empty:
+            fallback.attrs["data_stale"] = True
         return fallback
 
 
 # ---------- MA120 信号 ----------
-def get_stock_realtime_quote(stock_code: str) -> dict:
+def _fetch_stock_realtime_quote(stock_code: str) -> dict:
     """获取实时行情；失败时返回空字典，由调用方回退至日线收盘价。"""
     try:
         if _is_hk_code(stock_code):
@@ -299,6 +356,19 @@ def get_stock_realtime_quote(stock_code: str) -> dict:
         }
     except Exception:
         return {}
+
+
+def get_stock_realtime_quote(stock_code: str, database_only: bool = False) -> dict:
+    store = _market_store()
+    if not database_only:
+        quote = _fetch_stock_realtime_quote(stock_code)
+        if quote:
+            store.put_quote("stock", stock_code, quote)
+            return quote
+    saved = store.get_quote("stock", stock_code)
+    if saved:
+        return {**saved, "price_source": "database", "data_stale": True}
+    return {}
 
 
 def check_ma120_signal(df: pd.DataFrame, current_price: float | None = None) -> dict | None:
@@ -360,6 +430,8 @@ def enrich(item: dict) -> dict | None:
     signal = check_ma120_signal(df, current_price=quote.get("price"))
     if not signal:
         return None
+    if df.attrs.get("data_stale") or quote.get("data_stale"):
+        signal["signal"] = "hold"
     return {**item, **signal, **quote}
 
 
@@ -612,7 +684,7 @@ def _card_status(item: dict) -> str:
         return "买入信号"
     if item["price"] < item["buy_line"]:
         return "低于买入线"
-    return "高于MA120" if item["price"] >= item["ma120"] else "低于MA120"
+    return f"高于MA{MA_LONG}" if item["price"] >= item["ma120"] else f"低于MA{MA_LONG}"
 
 
 def _card_status_priority(item: dict) -> int:

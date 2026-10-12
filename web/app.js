@@ -2,7 +2,7 @@ const $ = (id) => document.getElementById(id);
 const money = (value) => `¥${Number(value || 0).toLocaleString('zh-CN', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
 const signedMoney = (value) => `${value >= 0 ? '+' : '-'}${money(Math.abs(value))}`;
 const quantity = (value) => Number(value || 0).toLocaleString('zh-CN');
-const statusNames = {buy:'计划买入', pause:'暂停定投', wait:'未到定投日', recorded:'本期已买入', market_closed:'无当日交易行情', blocked:'数据待补', small:'不足一手'};
+const statusNames = {buy:'计划买入', pause:'暂停定投', wait:'未到定投日', recorded:'本期已买入', market_closed:'无当日交易行情', blocked:'数据待补', small:'不足一手', stored:'数据库历史行情'};
 let data = null;
 let selectedId = null;
 let activeTab = 'plans';
@@ -143,6 +143,13 @@ function renderPlans() {
     cell(tr, active ? money(active.action_amount) : '—', 'amount');
     const statusCell = document.createElement('td');
     statusCell.append(statusBadge(active?.status));
+    if (active?.market) {
+      const dateNote = document.createElement('small');
+      dateNote.className = 'strategy-sub';
+      dateNote.textContent = `行情 ${active.market.quote_at?.replace('T', ' ').slice(0, 19) || '日期未知'}`;
+      if (active.market.refresh_error) dateNote.title = `更新失败，显示数据库数据：${active.market.refresh_error}`;
+      statusCell.append(dateNote);
+    }
     tr.append(statusCell);
     cell(tr, '›', 'row-arrow');
     tr.addEventListener('click', () => navigate(plan.id));
@@ -694,9 +701,9 @@ function planFrequency(plan) {
 
 function openPlanDialog() {
   if (!data) return;
-  $('planSource').textContent = data.sample ? '示例配置 · etf_plans.example.toml' : '本地配置 · etf_plans.toml';
+  $('planSource').textContent = data.sample ? '数据库中的示例计划' : 'SQLite 个人计划';
   $('planModeNote').textContent = data.sample
-    ? '当前金额、策略和持仓为示例。刷新会展示最新测算，但不保存运行记录，也不会下单。个人计划需先在项目根目录建立并编辑 etf_plans.toml。'
+    ? '当前金额、策略和持仓为示例。请进入配置管理修改并保存个人计划；保存后启用运行留档。'
     : '刷新会保存本次建议；页面只展示策略提示，不会下单或自动同步真实成交。';
   const body = $('planSettingsBody');
   body.replaceChildren();
@@ -723,7 +730,8 @@ function refreshResultMessage(next) {
   else if (rows.length && rows.every((row) => row.status === 'market_closed')) result = '当前无当日交易行情，本期无买入提示';
   else if (blocked) result = `${blocked} 只生效计划的数据待补`;
   else result = '本期没有新增买入建议';
-  return `已重新获取数据${latest ? `（最新报价 ${latest}）` : ''}；${result}。${next.sample ? '示例运行不留档' : '建议已留档'}，未下单。`;
+  const historical = rows.filter((row) => row.market?.data_stale).length;
+  return `数据检查完成${latest ? `（最新报价 ${latest}）` : ''}；${result}。${historical ? `${historical} 只继续使用数据库历史行情，暂停买入提示。` : ''}${next.sample ? '示例运行不留档' : '建议已留档'}，未下单。`;
 }
 
 function valuationUpdateWarning(next) {
@@ -788,8 +796,10 @@ function render(next) {
   $('blockedCount').textContent = data.report ? rows.filter((row) => row.status === 'blocked').length : '—';
   $('updatedAt').textContent = data.report ? `最近测算 ${data.report.generated_at.replace('T', ' ').slice(0, 19)} · 建议未下单${Date.now() - Date.parse(data.report.generated_at) >= 300_000 ? ' · 请刷新数据' : ''}` : '尚无测算快照';
   const sampleNotice = data.sample ? '当前使用示例计划，预算仅供观察；点击右上角可查看参数。' : '';
+  const storedCount = rows.filter((row) => row.market?.data_stale).length;
+  const storedNotice = storedCount ? `${storedCount} 只 ETF 显示数据库历史行情，日期见列表；点击刷新数据可更新，旧数据暂停买入提示。` : '';
   const valuationWarning = valuationUpdateWarning(data);
-  showNotice([sampleNotice, valuationWarning].filter(Boolean).join(' '), Boolean(valuationWarning));
+  showNotice([sampleNotice, storedNotice, valuationWarning].filter(Boolean).join(' '), Boolean(valuationWarning));
   renderStrategyGuide();
   renderTradeAlerts();
   renderPlans();
@@ -859,8 +869,6 @@ $('chartPosition').addEventListener('input', (event) => {
 
 request('/api/dashboard').then((next) => {
   render(next);
-  const generated = Date.parse(next.report?.generated_at || '');
-  if (!Number.isFinite(generated) || Date.now() - generated >= 300_000) refresh();
 })
   .catch((error) => showNotice(`读取失败：${error.message}`, true));
 window.addEventListener('popstate', () => {
