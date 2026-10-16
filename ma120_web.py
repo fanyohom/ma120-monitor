@@ -194,10 +194,6 @@ def _row(item, *, portfolio, hist_loader, quote_loader, today):
             row["status"] = "行情过期"
             row["error"] = f"最新日 K 日期 {last_day} 距今超过 15 天"
             return row
-        if (today - last_day).days > 15 and row["read_source"] != "database":
-            row["status"] = "行情过期"
-            row["error"] = f"最新日 K 日期 {last_day} 距今超过 15 天"
-            return row
         last_close = _positive_number(history.iloc[-1]["close"])
         if last_close is None:
             row["error"] = "最新日 K 收盘价无效"

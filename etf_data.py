@@ -223,8 +223,6 @@ def load_valuation_history(path: Path, index_code: str, database_path=None) -> p
     frame["available_date"] = pd.to_datetime(frame["available_date"], format="%Y-%m-%d", errors="raise")
     if frame["date"].isna().any() or frame["available_date"].isna().any():
         raise DataError("Invalid valuation or publication date")
-    if frame["date"].isna().any() or frame["available_date"].isna().any():
-        raise DataError("Invalid valuation or publication date")
     if (frame["available_date"] < frame["date"]).any() or frame["date"].duplicated().any():
         raise DataError("Invalid publication dates or duplicate valuation dates")
     frame["pe_ttm"] = frame["pe_ttm"].map(lambda value: positive(value, "pe_ttm"))
