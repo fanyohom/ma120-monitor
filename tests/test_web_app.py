@@ -3,6 +3,7 @@ import http.client
 import json
 import tempfile
 import threading
+import time
 import unittest
 from datetime import date, datetime, timedelta
 from http.server import ThreadingHTTPServer
@@ -21,6 +22,27 @@ def market(code, *_):
     rows = [[day.date().isoformat(), "10", "10", "10", "10", "1000"] for day in dates]
     return {"code": code, "qfq": rows, "raw": rows, "price": 8.0,
             "quote_at": now.isoformat(), "source": "test", "volume": 1000}
+
+
+class TolerantHTTPConnection(http.client.HTTPConnection):
+    """对keep-alive 连接被服务端中止做一次自动重连。
+
+    Windows 上 ThreadingHTTPServer 在「上一个响应 close()」到
+    「下一次 accept()」之间存在毫秒级空窗，复用长连接时客户端会收到
+    WinError 10053（ConnectionAbortedError）。这属于平台时序抖动而非业务
+    失败，重连一次即可；此实现让所有测试无需各自处理。
+    """
+
+    def request(self, *args, **kwargs):
+        for attempt in range(2):
+            try:
+                super().request(*args, **kwargs)
+                return
+            except (ConnectionAbortedError, ConnectionResetError):
+                if attempt:
+                    raise
+                self.close()
+                self.connect()
 
 
 class DashboardServiceTests(unittest.TestCase):
@@ -382,7 +404,7 @@ class DashboardServiceTests(unittest.TestCase):
         self.addCleanup(thread.join, 3)
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
-        connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=3)
+        connection = TolerantHTTPConnection("127.0.0.1", server.server_port, timeout=3)
         self.addCleanup(connection.close)
         connection.request("GET", "/api/ma120/history?code=600001")
         response = connection.getresponse()
@@ -428,7 +450,7 @@ class DashboardServiceTests(unittest.TestCase):
         self.addCleanup(thread.join, 3)
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
-        connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=3)
+        connection = TolerantHTTPConnection("127.0.0.1", server.server_port, timeout=3)
         self.addCleanup(connection.close)
         connection.request("GET", "/api/ma120/estimate?code=600001&start_date=2026-10-01")
         response = connection.getresponse()
@@ -472,7 +494,7 @@ class DashboardServiceTests(unittest.TestCase):
         self.addCleanup(thread.join, 3)
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
-        connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=3)
+        connection = TolerantHTTPConnection("127.0.0.1", server.server_port, timeout=3)
         self.addCleanup(connection.close)
 
         connection.request("GET", "/ma120")
@@ -511,7 +533,7 @@ class DashboardServiceTests(unittest.TestCase):
         self.addCleanup(thread.join, 3)
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
-        connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=3)
+        connection = TolerantHTTPConnection("127.0.0.1", server.server_port, timeout=3)
         self.addCleanup(connection.close)
 
         def request(method, target, payload=None, headers=None):
@@ -523,12 +545,27 @@ class DashboardServiceTests(unittest.TestCase):
             return response.status, json.loads(response.read())
 
         json_headers = {"Content-Type": "application/json"}
+
+        def dashboard_watchlist():
+            """轮询等待后台异步刷新落库，再返回快照里的关注池。
+
+            写请求不再同步重建行情，读接口在后台刷新完成前可能仍是旧快照，
+            因此这里用轮询而不是直接断言，避免依赖线程调度时序。
+            """
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                snapshot = Handler.stock_service.current()["snapshot"]
+                if snapshot is not None and snapshot["watchlist"] == result["items"]:
+                    return snapshot["watchlist"]
+                time.sleep(0.02)
+            return Handler.stock_service.current()["snapshot"]
+
         self.assertEqual(request("GET", "/api/ma120/watchlist"), (200, {"items": []}))
         status, result = request("POST", "/api/ma120/watchlist",
                                  {"code": "600001", "name": "测试股票"}, json_headers)
         self.assertEqual((status, result),
                          (200, {"items": [{"code": "600001", "name": "测试股票"}]}))
-        self.assertEqual(request("GET", "/api/ma120")[1]["snapshot"]["watchlist"], result["items"])
+        self.assertEqual(dashboard_watchlist(), result["items"])
         self.assertEqual(request("GET", "/api/ma120/watchlist"), (200, result))
 
         before = path.read_bytes()
@@ -558,11 +595,12 @@ class DashboardServiceTests(unittest.TestCase):
         self.assertEqual(request("PATCH", "/api/ma120/watchlist?code=600001",
                                  {"name": "新名称"}, json_headers),
                          (200, {"items": [{"code": "600001", "name": "新名称"}]}))
-        self.assertEqual(request("GET", "/api/ma120")[1]["snapshot"]["watchlist"][0]["name"],
-                         "新名称")
+        result = {"items": [{"code": "600001", "name": "新名称"}]}
+        self.assertEqual(dashboard_watchlist()[0]["name"], "新名称")
         self.assertEqual(request("DELETE", "/api/ma120/watchlist?code=600001"),
                          (200, {"items": []}))
-        self.assertEqual(request("GET", "/api/ma120")[1]["snapshot"]["watchlist"], [])
+        result = {"items": []}
+        self.assertEqual(dashboard_watchlist(), [])
 
     def test_ma120_watchlist_save_survives_quote_refresh_failure(self):
         path = Path(self.folder.name) / "watchlist.json"
@@ -571,12 +609,23 @@ class DashboardServiceTests(unittest.TestCase):
             raise OSError("行情暂不可用")
 
         service = StockDashboardService(loader=fail, watchlist_path=path)
+        service.ASYNC_REFRESH_DELAY = 0.01
         result = service.add_watchlist({"code": "1", "name": "测试"})
         self.assertEqual(result["items"], [{"code": "000001", "name": "测试"}])
-        self.assertIn("行情暂不可用", result["refresh_warning"])
-        self.assertEqual(service.current(), {"snapshot": None})
+        # 关注池已落库，即使行情刷新失败也不回滚
         self.assertEqual(service.watchlist(),
                          {"items": [{"code": "000001", "name": "测试"}]})
+        # 写请求不再同步重建，因此返回时刷新尚未完成，不应等待耗时重建
+        self.assertNotIn("refresh_warning", result)
+
+        # 等后台线程失败落地后，下一次写请求捎带上报失败原因
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and service._refresh_error is None:
+            time.sleep(0.02)
+        self.assertIn("行情暂不可用", service._refresh_error or "")
+        follow_up = service.add_watchlist({"code": "2", "name": "第二只"})
+        self.assertIn("行情暂不可用", follow_up["refresh_warning"])
+        self.assertEqual(service.current(), {"snapshot": None})
 
 
 if __name__ == "__main__":
