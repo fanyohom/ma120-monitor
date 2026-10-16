@@ -62,6 +62,32 @@ ma120-monitor/
 
 ## 用法
 
+### 数据保存与共享
+
+**当前默认是本地独立数据库，不会通过 GitHub 自动共享或同步。** 每份项目目录使用自己的 `data/market.sqlite3`，保存该目录下的关注池、持仓、ETF 计划、策略规则与行情。重复启动会继续读取原数据库；不同电脑或不同项目目录的数据各自独立。同一目录启动的服务使用同一份数据库，当前没有按登录用户区分个人数据。
+
+- GitHub 同步代码、SQL 表结构和默认种子；个人数据库、备份、成交账本和 `.env.local` 都不入 Git。
+- 其他人克隆项目后会创建自己的 SQLite，导入仓库默认关注池与 ETF 示例；不会自动获得你的本机持仓、最新个人配置或历史行情。
+- 在一台电脑上新增股票、修改计划或刷新行情，不会同步到另一台电脑。`git pull` 更新代码也不会覆盖或合并本地数据库。
+- 换电脑并希望保留自己的数据时，需迁移 SQLite 的一致备份，以及另行保留的 `dca_results/journal.sqlite3` 成交账本；不是只克隆代码。
+
+多人访问同一个服务器应用可以使用服务器上的同一份数据库，但**当前版本尚未提供共享部署模式**：服务只允许本机访问，也没有登录与用户权限管理。共享使用需要另行实现服务器部署、远程访问及权限控制。
+
+### 其他人首次运行
+
+安装 Git 和 uv 后，在终端执行：
+
+```bash
+git clone https://github.com/fanyohom/ma120-monitor.git
+cd ma120-monitor
+uv run python scripts/migrate_configuration.py
+uv run python web_app.py
+```
+
+首次 `uv run` 会自动准备 Python 3.12 和依赖，迁移命令创建本机数据库并导入初始配置。打开 [配置管理](http://127.0.0.1:8765/configuration) 调整自己的关注池、持仓和计划，再在 [ETF 工作台](http://127.0.0.1:8765/) 或 [股票监控](http://127.0.0.1:8765/ma120) 点击刷新获取行情；没有历史数据时需要先刷新。数据库不需要另外安装 MySQL。
+
+飞书推送是可选项，只使用网页时无需创建 `.env.local`；需要推送时再按下方步骤配置自己的 webhook。
+
 ### 安装 uv
 
 本项目使用 `uv` 管理 Python、虚拟环境和依赖。首次使用先安装 `uv`：
@@ -79,7 +105,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 安装后运行 `uv --version` 确认命令可用。项目通过 `pyproject.toml` 声明依赖，并用 `uv.lock` 锁定版本；首次执行 `uv run` 时会自动准备 Python 3.12 和项目环境。
 
-### 首次配置
+### 飞书推送配置（可选）
 
 项目提供了 `.env.example` 模板。先复制一份为 `.env.local`：
 
@@ -354,7 +380,7 @@ uv run python etf_dca.py --record-trade csi300 --side sell --shares 100 --price 
 
 ## 定时运行
 
-仓库已内置 GitHub Actions workflow：`.github/workflows/ma120-monitor.yml`，每周一至周五 **UTC 04:00**（北京时间 12:00，A 股与港股午间休市）自动执行，无需本机常开。
+仓库已内置 GitHub Actions workflow：`.github/workflows/ma120-monitor.yml`，每天 **UTC 03:30**（北京时间 11:30，A 股上午收盘后）自动执行，无需本机常开。监控 job 依赖测试 job，指标算错时不会推送。
 
 启用步骤：
 
@@ -365,9 +391,11 @@ uv run python etf_dca.py --record-trade csi300 --side sell --shares 100 --price 
 > 说明：
 >
 > - GitHub 的定时任务只支持 UTC，且**不保证准点** —— 实测曾延迟约 4 小时。未配置 secret 时脚本不会报错，只会在日志里提示跳过飞书推送。
-> - 定时设在午间休市，取到的是**上午收盘价**，因此信号为盘中口径，与收盘后跑的结果可能不同。
+> - 定时设在午间，取到的是**上午收盘价**，因此信号为盘中口径，与收盘后跑的结果可能不同。
+> - 交易日过滤已开启：workflow 用 `--skip-non-trading-day`，周末与法定节假日探测不到当日行情即跳过，不会空推卡片。
+> - `pull_request` 和 `push` 会触发 `test` job 跑单元测试，改动引入回归时会在合并前被拦住。
 
-定时规则的 `1-5` 只能表达「周一至周五」，遇法定节假日仍会触发。当前 workflow 未开启交易日过滤；需要时可在运行命令末尾添加 `--skip-non-trading-day`，脚本会在探测不到当日行情时跳过监控和推送。
+定时规则用「每天」而非「周一至周五」，因为 GitHub 的 cron 虽支持 `1-5`，但法定节假日无法表达。配合 `--skip-non-trading-day` 即可自动跳过非交易日。注意该判断**只在 09:30 之后可靠**，因此不要把同样的参数用在盘前任务上。
 
 ## 免责声明
 
