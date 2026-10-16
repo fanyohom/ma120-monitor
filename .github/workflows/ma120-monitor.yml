@@ -1,22 +1,56 @@
 name: MA120 Monitor
 
 on:
+  push:
+    branches: [main]
+  pull_request:
   schedule:
-    # 北京时间周一至周五 12:00（UTC 04:00），A 股与港股午间休市
-    - cron: '0 4 * * 1-5'
+    # 北京时间每天 11:30（UTC 03:30），上午收盘后看信号，下午仍来得及操作。
+    # 用「每天」而非「周一至周五」，周末与法定节假日由脚本的
+    # --skip-non-trading-day 自动跳过（RRULE 只能表达周一至周五）。
+    - cron: '30 3 * * *'
   workflow_dispatch: # 允许在 Actions 页面手动触发
 
 permissions:
   contents: read
 
 concurrency:
-  group: ma120-monitor
+  group: ma120-monitor-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  monitor:
+  test:
+    name: 单元测试
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install dependencies
+        run: uv sync --extra dev
+
+      # 回归测试失败会直接拦住合并：曾出现缓存冻结修复引入 2 项
+      # 行情数据测试失败却无人拦截的情况。
+      - name: Run pytest
+        env:
+          PYTHONUTF8: '1'
+        run: uv run python -m pytest -q
+
+  monitor:
+    name: 午间监控推送
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: test # 指标算错时不必再推送，避免把错误信号发到飞书
+    # 只有定时和手动触发才真正推送；push/pull_request 只跑上面的测试，
+    # 否则每次推送都会向飞书空推一张卡片。
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -34,4 +68,6 @@ jobs:
         env:
           FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
           PYTHONUTF8: '1'
-        run: uv run python stock_dynamic_monitor.py
+        # --skip-non-trading-day：非A 股交易日（周末与法定节假日）
+        # 探测不到当日实时行情即直接跳过，避免空推卡片。
+        run: uv run python stock_dynamic_monitor.py --skip-non-trading-day
