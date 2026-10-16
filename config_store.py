@@ -3,6 +3,8 @@
 import hashlib
 import json
 import sqlite3
+import threading
+import time
 import tomllib
 from contextlib import closing
 from datetime import datetime
@@ -27,10 +29,19 @@ def cents(value):
 
 
 class ConfigurationStore:
+    # 保护「读-改-写」复合操作，避免同进程多线程互相覆盖。
+    # 必须是**类级**锁：`ConfigurationService` 每个请求都新建一个
+    # ConfigurationStore 实例（见 web_app.py），若锁挂在实例上，
+    # 每次请求拿到的是不同锁，跨请求的并发写仍会互相覆盖 —— 那正是
+    # 关注池条目丢失的真实场景。数据库的 BEGIN IMMEDIATE 只能保证
+    # 单次事务原子，无法保证 operation 基于最新快照计算。
+    _write_lock = threading.RLock()
+
     def __init__(self, database=DEFAULT_DATABASE, root=None):
         self.database = Path(database)
         self.root = Path(root) if root is not None else self.database.resolve().parent.parent
         self.market = MarketStore(self.database)
+        self._write_lock = self.__class__._write_lock
 
     def connect(self):
         db = self.market.connect()
@@ -97,32 +108,58 @@ class ConfigurationStore:
                        (f"{source.resolve()}:{section}", hashlib.sha256(source.read_bytes()).hexdigest(),
                         datetime.now(TIMEZONE).isoformat()))
 
+    def _needs_seed(self, db) -> bool:
+        """只读判断是否还有未播种的段，不开写事务。
+
+        `initialize()` 被每个读写入口调用，若像原先那样无条件
+        `BEGIN IMMEDIATE`，纯读取也会占写锁；多线程并发时后到的连接
+        会拿到 `attempt to write a readonly database`，导致关注池/持仓
+        条目丢失。先用只读探测，确需播种时才开写事务。
+        """
+        for section in ("watchlist", "portfolio"):
+            if not self._meta(db, f"{section}_initialized"):
+                return True
+        if not self._meta(db, "etf_initialized"):
+            return True
+        return self._meta(db, "revision") is None
+
     def initialize(self):
         """Seed each section once. A deliberately emptied database stays empty."""
-        with closing(self.connect()) as db, db:
-            db.execute("BEGIN IMMEDIATE")
-            for section in ("watchlist", "portfolio"):
-                if self._meta(db, f"{section}_initialized"):
-                    continue
-                items, source = self._legacy_stocks(section)
-                self._replace_stocks(db, section, items)
-                self._set_meta(db, f"{section}_initialized", 1)
-                self._import_record(db, source, section)
-            if not self._meta(db, "etf_initialized"):
-                source = self.root / "etf_plans.toml"
-                sample = not source.exists()
-                if sample:
-                    source = BASE_DIR / "etf_plans.example.toml"
-                config = validate_config(tomllib.loads(source.read_text(encoding="utf-8-sig")), self.root)
-                self._save_rules(db, config["settings"], config["valuation"], MA_DEFAULTS)
-                for index, plan in enumerate(config["plans"]):
-                    self._put_plan(db, plan, index)
-                self._set_meta(db, "etf_initialized", 1)
-                self._set_meta(db, "sample_mode", int(sample))
-                self._import_record(db, source, "etf")
-            if self._meta(db, "revision") is None:
-                self._set_meta(db, "revision", 1)
-                self._audit(db, "initial_import")
+        # connect() 本身就会 executescript 执行建表 DDL，属于写操作，
+        # 必须整段持锁；否则这里仍会与并发写抢 SQLite 写锁。
+        with self._write_lock:
+            with closing(self.connect()) as db:
+                if not self._needs_seed(db):
+                    return
+                with closing(self.connect()) as db2, db2:
+                    self._seed_with(db2)
+
+    def _seed_with(self, db):
+        """在已开启的写事务内补齐未播种的段，幂等。"""
+        db.execute("BEGIN IMMEDIATE")
+        # 取得写锁后重新判断：可能已被并发的另一个线程播种完成。
+        for section in ("watchlist", "portfolio"):
+            if self._meta(db, f"{section}_initialized"):
+                continue
+            items, source = self._legacy_stocks(section)
+            self._replace_stocks(db, section, items)
+            self._set_meta(db, f"{section}_initialized", 1)
+            self._import_record(db, source, section)
+        if not self._meta(db, "etf_initialized"):
+            source = self.root / "etf_plans.toml"
+            sample = not source.exists()
+            if sample:
+                source = BASE_DIR / "etf_plans.example.toml"
+            config = validate_config(tomllib.loads(source.read_text(encoding="utf-8-sig")), self.root)
+            self._save_rules(db, config["settings"], config["valuation"], MA_DEFAULTS)
+            for index, plan in enumerate(config["plans"]):
+                self._put_plan(db, plan, index)
+            self._set_meta(db, "etf_initialized", 1)
+            self._set_meta(db, "sample_mode", int(sample))
+            self._import_record(db, source, "etf")
+        if self._meta(db, "revision") is None:
+            self._set_meta(db, "revision", 1)
+            self._audit(db, "initial_import")
 
     def _replace_stocks(self, db, section, items):
         table = "watchlist_entries" if section == "watchlist" else "portfolio_positions"
@@ -152,13 +189,26 @@ class ConfigurationStore:
         from watchlist_store import _validate_items as validate_watchlist
         from portfolio_store import _validate_items as validate_portfolio
         self.initialize()
-        with closing(self.connect()) as db, db:
-            db.execute("BEGIN IMMEDIATE")
-            items = operation(self._stocks(db, section))
-            items = validate_watchlist(items) if section == "watchlist" else validate_portfolio(items)
-            self._replace_stocks(db, section, items)
-            self._changed(db, f"update_{section}")
-            return items
+        # 同一进程内多个线程共享一个 store 实例时（例如 Web 工作台的
+        # ThreadingHTTPServer），必须把「读当前列表 → 追加 → 全量替换」串行化，
+        # 否则后到的线程会基于过期的快照覆盖前者的结果，表现为关注池条目丢失。
+        # 锁只解决本进程竞争；跨进程（如GitHub Actions 与本机同时写库）时
+        # SQLite 仍可能拒绝写，此时重试而不是丢弃用户的操作。
+        with self._write_lock:
+            for attempt in range(4):
+                try:
+                    with closing(self.connect()) as db, db:
+                        db.execute("BEGIN IMMEDIATE")
+                        items = operation(self._stocks(db, section))
+                        items = (validate_watchlist(items) if section == "watchlist"
+                                 else validate_portfolio(items))
+                        self._replace_stocks(db, section, items)
+                        self._changed(db, f"update_{section}")
+                        return items
+                except sqlite3.OperationalError:
+                    if attempt == 3:
+                        raise
+                    time.sleep(0.2 * (attempt + 1))
 
     @staticmethod
     def _plans(db, include_disabled=False):

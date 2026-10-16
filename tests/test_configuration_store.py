@@ -81,6 +81,35 @@ class ConfigurationStoreTests(unittest.TestCase):
             list(pool.map(add, ["600002", "600003", "600004", "600005"]))
         self.assertEqual(len(self.store.stocks("watchlist")), 5)
 
+    def test_concurrent_updates_across_store_instances_do_not_lose_entries(self):
+        """每个线程各自新建 store，模拟 Web 工作台「每请求一个实例」的真实用法。
+
+        `ConfigurationService.__init__` 每次请求都 new 一个 ConfigurationStore，
+        所以互斥必须是**类级**的。若锁挂在实例上，每个请求拿到不同的锁，
+        跨请求并发写会互相覆盖，关注池条目静默丢失
+        （异常表现为 `attempt to write a readonly database`）。
+        上一条测试共用一个实例，恰好绕过了这个缺陷，故两条必须并存。
+
+        用栅栏同步起跑并让每个线程反复进出事务，拉长竞争窗口；
+        否则线程太快、窗口太窄，缺陷下也可能侥幸通过。
+        """
+        self.store.initialize()
+        threads, rounds = 4, 20
+        barrier = threading.Barrier(threads)
+
+        def add(t):
+            store = ConfigurationStore(self.database, self.root)  # 每线程独立实例
+            barrier.wait(timeout=10)  # 同步起跑，最大化冲突
+            for r in range(rounds):  # 反复进出事务，累积丢数据概率
+                code = f"{600100 + t * rounds + r:06d}"  # 每轮唯一，避免被去重拒绝
+                store.mutate_stocks("watchlist", lambda rows: rows + [{"code": code, "name": code}])
+
+        with ThreadPoolExecutor(max_workers=threads) as pool:
+            list(pool.map(add, range(threads)))
+        # 初始 1 条 + threads*rounds 条；丢条目会少于该值
+        self.assertEqual(len(ConfigurationStore(self.database, self.root).stocks("watchlist")),
+                         1 + threads * rounds)
+
     def test_plan_money_constraints_and_disable_preserves_identity(self):
         plan = self.store.config()["plans"][0]
         changed = {**plan, "base_amount": 123.45, "strategy": "drawdown"}

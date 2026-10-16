@@ -226,6 +226,75 @@ def _write_cache(code: str, df: pd.DataFrame, fetched_at=None) -> None:
     _market_store().put_history("stock", code, {"bars": rows}, {"source": source}, fetched_at)
 
 
+def _last_bar_date(df: pd.DataFrame):
+    """取DataFrame 的最后一根日 K 日期，兼容 DatetimeIndex 与 RangeIndex。
+
+    不能直接用 `df.index.max()`：回退数据可能来自不同代码路径，
+    索引未必是日期类型（本地记忆里记录过 `get_stock_hist_data` 两条
+    返回路径结构不一致：联网拉取的 df 已set_index("date")，
+    而缓存反序列化出来的 date 只是普通列、index 是 RangeIndex）。
+    直接比较 `index.max()` 会在 RangeIndex 上与 DatetimeIndex 比较失败，
+    导致深历史请求被误判为「不新」而回退旧数据。
+    """
+    if df is None or df.empty:
+        return None
+    if isinstance(df.index, pd.DatetimeIndex):
+        return pd.Timestamp(df.index.max())
+    # 索引不是日期时，尝试从常见日期列取值；都没有则返回 None，
+    # 表示「无法判断日期」，交由调用方按行数等其它依据决定。
+    for column in ("date", "day", "trade_date"):
+        if column in df.columns:
+            try:
+                parsed = pd.to_datetime(df[column], errors="coerce").max()
+            except (TypeError, ValueError):
+                continue
+            if not pd.isna(parsed):
+                return pd.Timestamp(parsed)
+    return None
+
+
+def _newer_than(df: pd.DataFrame, fallback: pd.DataFrame) -> bool:
+    """判断新拉的日 K 是否比回退数据更值得采用。
+
+    旧逻辑是 `len(df) < len(fallback)` 就回退，一旦库里存过 800 根深度历史，
+    日常请求的 200 根恒被判为「更差」，日 K 从此冻结、MA120 持续落后。
+    改为看最后一根日期：日期不落后即可用（行数只需够算 MA120）。
+
+    `days` 由调用方按请求传入，短请求（如 days=2）不该因为不足 MA_LONG 被否。
+    """
+    if fallback is None or fallback.empty:
+        return True
+    if len(df) < MA_LONG and len(fallback) < MA_LONG:
+        # 双方都不够 MA120，无法用均线判定；新数据有内容即可采用。
+        return not df.empty
+    if len(df) < MA_LONG:
+        return False
+    new_date = _last_bar_date(df)
+    old_date = _last_bar_date(fallback)
+    if new_date is None or old_date is None:
+        # 日期不可判定时，回退到「行数不比旧数据少即视为更新」的保守策略。
+        return len(df) >= len(fallback)
+    return new_date >= old_date
+
+
+def _merge_bars(fallback: pd.DataFrame, df: pd.DataFrame) -> pd.DataFrame:
+    """新数据覆盖旧数据同一日期，同时保留旧数据更长的历史深度。"""
+    if fallback is None or fallback.empty or df is None or df.empty:
+        return df
+    if not set(df.columns).issubset(set(fallback.columns)):
+        return df
+    try:
+        merged = pd.concat([fallback, df])
+        if isinstance(merged.index, pd.DatetimeIndex):
+            merged = merged[~merged.index.duplicated(keep="last")].sort_index()
+        else:
+            # 索引无法用于去重时，保留新数据原样，避免产出错误的行数。
+            return df
+    except Exception:
+        return df
+    return merged
+
+
 def get_stock_hist_data(stock_code: str, days: int | None = None, force: bool = False,
                         database_only: bool = False) -> pd.DataFrame:
     """获取前复权日 K：A 股使用新浪，港股使用腾讯。"""
@@ -269,8 +338,9 @@ def get_stock_hist_data(stock_code: str, days: int | None = None, force: bool = 
             df = df.set_index("date").sort_index()
             for col in ["open", "high", "low", "close", "volume"]:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
-            if len(df) < len(fallback):
+            if not _newer_than(df, fallback):
                 return fallback
+            df = _merge_bars(fallback, df)
             _write_cache(stock_code, df)
             return df
 
@@ -287,8 +357,9 @@ def get_stock_hist_data(stock_code: str, days: int | None = None, force: bool = 
         df = df.set_index("date").sort_index()
         for col in ["open", "high", "low", "close", "volume"]:
             df[col] = pd.to_numeric(df[col], errors="coerce")
-        if len(df) < len(fallback):
+        if not _newer_than(df, fallback):
             return fallback
+        df = _merge_bars(fallback, df)
         _write_cache(stock_code, df)
         return df
     except Exception:
