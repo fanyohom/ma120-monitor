@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import logging
 import sqlite3
 import threading
 from contextlib import closing
@@ -332,37 +333,133 @@ class DashboardService:
 
 
 class StockDashboardService:
+    # 后台刷新的去抖窗口：连续写入会不断重置窗口，等到一个「静默期」后才重建，
+    # 因此一批批量导入只触发一次全量重建。写请求不等待它，立即返回。
+    ASYNC_REFRESH_DELAY = 0.5
+
     def __init__(self, loader=build_ma120_dashboard, history_loader=build_ma120_history,
                  watchlist_path=None, database_path=None):
         self.loader = loader
         self.history_loader = history_loader
         self.watchlist_path = watchlist_path
         self.snapshot = None
+        # 只保护关注池写入，持有时间仅毫秒级。
         self.lock = threading.Lock()
+        # 只保护 snapshot 的读取与整体替换，不覆盖耗时重建过程本身。
+        # 锁序全类只有 self.lock -> self._snapshot_lock 这一个方向（见 refresh），
+        # 不存在反向获取（持 _snapshot_lock 再取 lock），故无锁序反转、无死锁风险。
+        self._snapshot_lock = threading.Lock()
+        # 只保护后台刷新线程的启动决策，保证同一时刻最多一个刷新线程。
+        self._refresh_gate = threading.Lock()
+        # 脏标记：写请求置位、后台线程消费，保证重建期间的新写入不会被丢弃。
+        self._dirty = threading.Event()
+        self._refresh_thread = None
+        # 最近一次后台刷新失败的原因；成功刷新后清空。
+        # 写请求已返回，无法同步得知本次刷新结果，故由「下一次写请求」捎带告知，
+        # 这是异步化后 refresh_warning 的等价语义（见 _change_watchlist 注释）。
+        self._refresh_error = None
         self.database_mode = loader is build_ma120_dashboard
         self.store = MarketStore(database_path or database_for_cache(monitor.CACHE_DIR)) if self.database_mode or database_path else None
 
-    def current(self):
-        if self.database_mode and self.snapshot is not None:
+    def _build_snapshot(self, force: bool = False):
+        """构建全量快照。不持有 self.lock，调用方自行决定并发策略。"""
+        if not self.database_mode:
+            return self.loader()
+        if force:
+            return build_ma120_dashboard(hist_loader=lambda code:
+                                         monitor.get_stock_hist_data(code, days=HISTORY_FETCH_BARS, force=True))
+        return build_ma120_dashboard(
+            hist_loader=lambda code: monitor.get_stock_hist_data(code, database_only=True),
+            quote_loader=lambda code: monitor.get_stock_realtime_quote(code, database_only=True))
+
+    def _snapshot_expired(self) -> bool:
+        if not self.database_mode or self.snapshot is None:
+            return False
+        try:
             generated_at = datetime.fromisoformat(self.snapshot["generated_at"])
-            if (datetime.now(TIMEZONE) - generated_at).total_seconds() > 300:
+        except (KeyError, TypeError, ValueError):
+            return False
+        return (datetime.now(TIMEZONE) - generated_at).total_seconds() > 300
+
+    def current(self):
+        # 快照锁只用于读取/替换，不覆盖重建过程，读接口不会被后台刷新拖住。
+        with self._snapshot_lock:
+            if self._snapshot_expired():
                 self.snapshot = None
-        if self.snapshot is None:
+            snapshot = self.snapshot
+        if snapshot is None:
             if self.database_mode:
-                self.snapshot = build_ma120_dashboard(
-                    hist_loader=lambda code: monitor.get_stock_hist_data(code, database_only=True),
-                    quote_loader=lambda code: monitor.get_stock_realtime_quote(code, database_only=True))
+                snapshot = self._build_snapshot()
             elif self.store:
-                self.snapshot = self.store.get_dashboard("ma120")
-        return {"snapshot": self.snapshot}
+                # 非数据库模式只读已持久化的快照，不主动调用 loader
+                snapshot = self.store.get_dashboard("ma120")
+            else:
+                return {"snapshot": None}
+            with self._snapshot_lock:
+                # 双检：期间若有其他线程完成重建则复用，避免重复计算
+                if self.snapshot is None:
+                    self.snapshot = snapshot
+                else:
+                    snapshot = self.snapshot
+        return {"snapshot": snapshot}
 
     def refresh(self):
         with self.lock:
-            self.snapshot = (build_ma120_dashboard(hist_loader=lambda code:
-                             monitor.get_stock_hist_data(code, days=HISTORY_FETCH_BARS, force=True)) if self.database_mode else self.loader())
+            self._refresh_error = None
+            snapshot = self._build_snapshot(force=True)
+            with self._snapshot_lock:
+                self.snapshot = snapshot
             if self.store:
-                self.store.put_dashboard("ma120", self.snapshot)
-            return {"snapshot": self.snapshot}
+                self.store.put_dashboard("ma120", snapshot)
+            return {"snapshot": snapshot}
+
+    def _refresh_worker(self):
+        """后台刷新线程：合并窗口内的多次脏标记，最后做一次重建。
+
+        关键点：重建期间不清空 self.snapshot。读接口在重建完成前继续返回
+        上一份快照（可能短暂偏旧），既不会被阻塞，也不会闪空——与改造前
+        「写完立刻读一定拿得到数据」的语义保持一致。
+        """
+        try:
+            # 合并窗口：等一个「静默期」再重建，连续写入会不断重置窗口，
+            # 因此一批批量导入只会触发一次全量重建。
+            # 注意必须先 clear 再 wait：脏标记在本方法进入时必然已置位，
+            # 直接 wait 会立即返回，窗口形同虚设。
+            while self._dirty.is_set():
+                self._dirty.clear()
+                if self._dirty.wait(self.ASYNC_REFRESH_DELAY):
+                    continue  # 窗口内又有新写入，重置窗口继续等
+                break
+            snapshot = self._build_snapshot()
+            # 整体替换而非原地修改，读侧只会看到完整的旧值或新值
+            with self._snapshot_lock:
+                self.snapshot = snapshot
+            if self.store:
+                self.store.put_dashboard("ma120", snapshot)
+            self._refresh_error = None
+        except Exception as exc:  # 后台失败不能影响已完成的写入
+            self._refresh_error = str(exc)
+            logging.getLogger(__name__).warning("异步行情刷新失败：%s", exc)
+        finally:
+            # 重建期间若有新写入且此时已无线程在跑，立刻补一轮，避免脏标记丢失
+            with self._refresh_gate:
+                self._refresh_thread = None
+            if self._dirty.is_set():
+                self._schedule_async_refresh()
+
+    def _schedule_async_refresh(self):
+        """标记脏并确保后台刷新线程在运行（同一时刻最多一个）。
+
+        调用方立即返回，不等待重建；本方法不做任何阻塞等待。
+        """
+        self._dirty.set()
+        with self._refresh_gate:
+            # 存活判断与赋值都在锁内完成，并发写请求只有一个能启动线程，
+            # 其余复用同一线程，保证同一时刻最多一个后台刷新在跑。
+            if self._refresh_thread is None or not self._refresh_thread.is_alive():
+                thread = threading.Thread(target=self._refresh_worker, name="ma120-refresh", daemon=True)
+                self._refresh_thread = thread
+                thread.start()
 
     def watchlist(self):
         with self.lock:
@@ -375,16 +472,21 @@ class StockDashboardService:
             else:
                 items = read_watchlist(self.watchlist_path)
                 updated = write_watchlist(operation(items), self.watchlist_path)
-            try:
-                if self.database_mode:
-                    self.snapshot = None
-                    self.current()
-                else:
-                    self.snapshot = self.loader()
-            except Exception as exc:
-                self.snapshot = None
-                return {"items": updated, "refresh_warning": f"关注池已保存，行情刷新失败：{exc}"}
-            return {"items": updated}
+        # 注意：此处刻意不清空 self.snapshot。清空会让紧接着的读请求在
+        # current() 里触发一次同步全量重建，既阻塞读接口，又与后台线程重复计算，
+        # 等于把「写请求慢」的问题转移到了读接口上。
+        # 保留旧快照直到后台整体替换，读侧始终可用（可能短暂偏旧）。
+        #
+        # refresh_warning 语义（异步化后的取舍）：行情重建已完全移出写请求，
+        # 写请求返回时本次刷新必然尚未开始，因此**无法**再同步回报本次刷新结果。
+        # 这里改为「捎带上一次后台刷新的失败原因」：失败被记录后，下一次写请求
+        # 会带上该警告，成功刷新后自动清除。既保留了字段与语义，
+        # 又不让写请求为等一个数秒的重建而阻塞。
+        result = {"items": updated}
+        if self._refresh_error:
+            result["refresh_warning"] = f"关注池已保存，行情刷新失败：{self._refresh_error}"
+        self._schedule_async_refresh()
+        return result
 
     def add_watchlist(self, payload):
         code = normalize_code(payload.get("code"))
