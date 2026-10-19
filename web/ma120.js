@@ -214,6 +214,20 @@ function rowsForScope() {
     sell: {sell:0, above_sell:1, between:2, below_buy:3, buy:4, unavailable:5},
   };
   const statusKey = (row) => row.error ? 'unavailable' : row.signal || row.zone || 'between';
+  // 次级排序键：同状态下按偏离程度排，让「跌得最深的」「涨得最高的」浮到前面。
+  // 三种口径都由ma120_pct 推导，不需要额外字段：
+  //   买入区 -> 偏离越小越靠前（跌破买入线越深越优先看）
+  //   卖出区 -> 偏离越大越靠前（超出卖出线越多越优先看）
+  //   区间内 -> 绝对值越小越靠前（最贴近阈值的先看）
+  const deviationTiebreak = (row) => {
+    const pct = Number(row.ma120_pct);
+    if (!Number.isFinite(pct)) return Infinity;
+    const key = statusKey(row);
+    if (key === 'below_buy' || key === 'buy') return pct;
+    if (key === 'above_sell' || key === 'sell') return -pct;
+    if (key === 'between') return Math.abs(pct);
+    return Infinity;
+  };
   return rows.filter((row) => {
     if (query && !`${row.name} ${row.code}`.toLowerCase().includes(query)) return false;
     if (filter === 'all') return true;
@@ -223,7 +237,10 @@ function rowsForScope() {
     return row.zone === filter;
   }).sort((left, right) => {
     if (sort === 'code') return left.code.localeCompare(right.code);
-    return ranks[sort][statusKey(left)] - ranks[sort][statusKey(right)] || left.code.localeCompare(right.code);
+    if (sort === 'deviation') return deviationTiebreak(left) - deviationTiebreak(right) || left.code.localeCompare(right.code);
+    return ranks[sort][statusKey(left)] - ranks[sort][statusKey(right)]
+      || deviationTiebreak(left) - deviationTiebreak(right)
+      || left.code.localeCompare(right.code);
   });
 }
 
