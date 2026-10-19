@@ -1,0 +1,7 @@
+# Windows 批处理必须用 CRLF，且不能带 BOM。
+# git 的 core.autocrlf=true 会把 .bat 存成 LF，检出时在不同环境下
+# 可能不再被 cmd 正确解析，这里强制以 CRLF 入库。
+*.bat text eol=crlf
+
+# shell 脚本保持 LF
+*.sh text eol=lf

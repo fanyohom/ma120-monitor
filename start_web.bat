@@ -1,31 +1,39 @@
 @echo off
-REM MA120 Web 工作台一键启动
-REM 用法：双击本文件，或在项目根目录执行 start_web.bat
-REM 停止：在本窗口按 Ctrl+C
+REM ============================================================
+REM  MA120 Web Console - one-click launcher (Windows)
+REM
+REM  IMPORTANT: Keep this file ASCII-only (UTF-8 without BOM)
+REM  with CRLF line endings.
+REM  cmd.exe decodes .bat using the system ANSI codepage (GBK on
+REM  zh-CN), so Chinese comments get mangled into bogus commands
+REM  (e.g. "'et' is not recognized"). English comments are safe on
+REM  any locale. Do NOT add non-ASCII characters to this file.
+REM ============================================================
 
 cd /d "%~dp0"
 
-REM Windows 上 uv/python 输出中文需要 UTF-8，否则中文股票名会乱码
+REM Chinese stock names need UTF-8 or they show as mojibake
 set PYTHONUTF8=1
-REM 把 uv 缓存放到项目内，避免污染用户全局目录
+REM Keep uv cache inside the project instead of the user profile
 set UV_CACHE_DIR=%~dp0.uv-cache
 
 echo.
-echo   MA120 Web 工作台启动中...
-echo   地址：http://127.0.0.1:8765
-echo   停止：在此窗口按 Ctrl+C
+echo   MA120 Web Console starting...
+echo   URL: http://127.0.0.1:8765
+echo   Stop: press Ctrl+C in this window
 echo.
 
-REM 先探测端口是否已被占用，避免静默失败（起第二个实例会报 address in use）
+REM Detect port 8765 already in use to avoid a silent failure.
 netstat -ano | findstr /R /C:"LISTENING.*:8765" >nul
 if %errorlevel% equ 0 (
-    echo   [提示] 端口 8765 已在监听，服务可能已经在运行了。
-    echo          若页面打不开，先检查是否有旧进程占用端口。
+    echo   [NOTE] Port 8765 is already listening.
+    echo          If the page will not open, an old instance may
+    echo          still be holding the port. Close it first.
     echo.
 )
 
 uv run python web_app.py --host 127.0.0.1 --port 8765
 
 echo.
-echo   服务已停止。
+echo   Server stopped.
 pause
