@@ -217,6 +217,7 @@ function rowsForScope() {
   return rows.filter((row) => {
     if (query && !`${row.name} ${row.code}`.toLowerCase().includes(query)) return false;
     if (filter === 'all') return true;
+    if (filter === 'signal_only') return row.signal === 'buy' || row.signal === 'sell';
     if (filter === 'unavailable') return Boolean(row.error);
     if (filter === 'buy' || filter === 'sell') return row.signal === filter;
     return row.zone === filter;
@@ -272,7 +273,7 @@ function renderRows() {
   currentPage = Math.min(currentPage, pageCount);
   const start = (currentPage - 1) * pageSize;
   const visibleRows = rows.slice(start, start + pageSize);
-  $('stockCountLabel').textContent = `本页 ${visibleRows.length} 只 · 筛选 ${rows.length} / 全部 ${total} 只 · 买入区 ${dashboard.summary.buy_zone} · 卖出区 ${dashboard.summary.sell_zone}`;
+  $('stockCountLabel').textContent = `本页 ${visibleRows.length} 只 · 筛选 ${rows.length} / 全部 ${total} 只 · 今日买入 ${dashboard.summary.buy_signals} · 今日卖出 ${dashboard.summary.sell_signals} · 买入区 ${dashboard.summary.buy_zone} · 卖出区 ${dashboard.summary.sell_zone}`;
   $('stockPageInfo').textContent = rows.length
     ? `${start + 1}–${start + visibleRows.length} / ${rows.length} · 第 ${currentPage} / ${pageCount} 页`
     : '0 / 0 · 第 1 / 1 页';
