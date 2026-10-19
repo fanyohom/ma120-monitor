@@ -39,6 +39,9 @@ portfolio.json.bak
 
 # 改表前的备份（stocks.xlsx.bak.<日期>），用于误删回滚，不入版本库
 stocks.xlsx.bak.*
+# 其余配置文件的改前备份同理（etf_plans.toml.bak.<时间戳> 等）
+*.toml.bak.*
+*.py.bak.*
 
 # WorkBuddy 本地工作区
 .workbuddy/
