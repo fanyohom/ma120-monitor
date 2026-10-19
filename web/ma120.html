@@ -36,13 +36,13 @@
         <button class="tab" type="button" data-scope="portfolio" role="tab" aria-selected="false">持仓</button>
         <button class="tab" type="button" data-scope="watchlist" role="tab" aria-selected="false">关注池</button>
       </div>
-      <div class="stock-controls"><label class="sr-only" for="stockSearch">搜索股票</label><input id="stockSearch" type="search" placeholder="搜索名称或代码"><label class="sr-only" for="stockFilter">状态筛选</label><select id="stockFilter"><option value="all">全部状态</option><option value="buy">今日买入信号</option><option value="sell">今日卖出信号</option><option value="below_buy">低于买入线</option><option value="above_sell">高于卖出线</option><option value="between">区间内</option><option value="unavailable">数据待补</option></select><label class="sr-only" for="stockSort">排序方式</label><select id="stockSort"><option value="signal">状态 · 信号优先</option><option value="buy">状态 · 买入优先</option><option value="sell">状态 · 卖出优先</option><option value="code">代码顺序</option></select></div>
+      <div class="stock-controls"><label class="sr-only" for="stockSearch">搜索股票</label><input id="stockSearch" type="search" placeholder="搜索名称或代码"><label class="sr-only" for="stockFilter">状态筛选</label><select id="stockFilter"><option value="all">全部状态</option><option value="signal_only">只看今日信号</option><option value="buy">今日买入信号</option><option value="sell">今日卖出信号</option><option value="below_buy">低于买入线</option><option value="above_sell">高于卖出线</option><option value="between">区间内</option><option value="unavailable">数据待补</option></select><label class="sr-only" for="stockSort">排序方式</label><select id="stockSort"><option value="signal">状态 · 信号优先</option><option value="buy">状态 · 买入优先</option><option value="sell">状态 · 卖出优先</option><option value="code">代码顺序</option></select></div>
     </div>
 
     <div class="section-title stock-list-head"><div><h2>监控清单</h2><p id="stockCountLabel">等待行情</p></div><span id="stockRulePill" class="subtle-pill">MA120 × 0.88 / 1.12</span></div>
     <div class="table-scroll"><table class="stock-table"><thead><tr><th>股票 / 分类</th><th>现价</th><th data-stock-ma-label>MA120</th><th>偏离 MA</th><th>买入线</th><th>卖出线</th><th>状态</th><th>持仓浮盈亏</th><th></th></tr></thead><tbody id="stockRows"><tr><td class="empty-row" colspan="9">正在读取清单...</td></tr></tbody></table></div>
     <nav class="stock-pagination" aria-label="监控清单分页">
-      <label for="stockPageSize">每页 <select id="stockPageSize"><option value="10">10</option><option value="20">20</option><option value="50">50</option></select> 只</label>
+      <label for="stockPageSize">每页 <select id="stockPageSize"><option value="10">10</option><option value="20" selected>20</option><option value="50">50</option><option value="999">全部</option></select> 只</label>
       <div class="stock-page-nav"><span id="stockPageInfo" aria-live="polite">—</span><button id="stockPrevPage" class="stock-page-button" type="button" aria-label="上一页" title="上一页" disabled>←</button><button id="stockNextPage" class="stock-page-button" type="button" aria-label="下一页" title="下一页" disabled>→</button></div>
     </nav>
     </div>
