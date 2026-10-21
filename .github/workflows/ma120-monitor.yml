@@ -1,5 +1,11 @@
 name: MA120 Monitor
 
+# 注意：astral-sh/setup-uv 自 v8.0.0 起不再发布 major/minor 标签，
+# 必须写完整版本号（如 v10.3.0）或 commit SHA。写成 @v10 会让整个 workflow
+# 在解析阶段就失败（几秒退出、所有步骤都不执行），报错为
+# "Unable to resolve action `astral-sh/setup-uv@v10`, unable to find version `v10`"。
+# 升级 setup-uv 时请连号一起改，不要图省事改回 @v11。
+
 on:
   push:
     branches: [main]
@@ -25,10 +31,10 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@v7.0.1
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10
+        uses: astral-sh/setup-uv@v10.3.0
         with:
           enable-cache: true
           cache-dependency-glob: uv.lock
@@ -53,10 +59,10 @@ jobs:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@v7.0.1
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10
+        uses: astral-sh/setup-uv@v10.3.0
         with:
           enable-cache: true
           cache-dependency-glob: uv.lock
