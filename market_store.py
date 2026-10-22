@@ -247,7 +247,50 @@ class MarketStore:
                                  (kind, code, instant.isoformat(), digest)).fetchone()[0]
             db.executemany("INSERT OR IGNORE INTO daily_bars VALUES (?,?,?,?,?,?,?,?,?)",
                            [(version, *record) for record in records])
+            # 同一个事务内清理旧版本，避免历史无限堆积。
+            self._prune_versions(db, kind, code)
         return version
+
+    # 每支标的保留的完整历史版本数。
+    #
+    # 为什么曾经会堆到 63 份：唯一键是 (kind,code,fetched_at,digest)，
+    # fetched_at 每次刷新都是新时间戳，所以永远插新行、旧行永不回收。
+    # 一天刷新几次、连跑十天，就是每支几十份几乎相同的 809 根日 K。
+    #
+    # 为什么要保留 2 份而不是 1 份：留一份「上一版完整快照」作为兜底，
+    # 万一某次数据源返回残缺，还能回退；再多的版本没有任何用途
+    # —— daily_bars 里只有原始 K 线，MA120 等指标都是从它重算的。
+    KEEP_VERSIONS = 2
+
+    def _prune_versions(self, db, kind, code, keep=None):
+        """删除该标的多余的旧版本及其日 K。
+
+        注意 daily_bars.version_id 的外键没有 ON DELETE CASCADE
+        （连接上 PRAGMA foreign_keys=ON），所以必须先删子表再删父表，
+        否则会因外键约束失败。
+        """
+        keep = self.KEEP_VERSIONS if keep is None else keep
+        stale = [row[0] for row in db.execute(
+            "SELECT id FROM history_versions WHERE kind=? AND code=? "
+            "ORDER BY fetched_epoch DESC, id DESC LIMIT -1 OFFSET ?",
+            (kind, code, keep))]
+        if not stale:
+            return 0
+        marks = ",".join("?" * len(stale))
+        db.execute(f"DELETE FROM daily_bars WHERE version_id IN ({marks})", stale)
+        db.execute(f"DELETE FROM history_versions WHERE id IN ({marks})", stale)
+        return len(stale)
+
+    def prune_history(self, keep=None):
+        """按标的批量清理历史版本（供一次性瘦身或定期维护调用）。"""
+        keep = self.KEEP_VERSIONS if keep is None else keep
+        removed = 0
+        with self.write() as db:
+            pairs = [(row[0], row[1]) for row in db.execute(
+                "SELECT DISTINCT kind, code FROM history_versions")]
+            for kind, code in pairs:
+                removed += self._prune_versions(db, kind, code, keep)
+        return removed
 
     def get_history(self, kind, code, min_rows=1, longest=False):
         if not self.path.exists():
