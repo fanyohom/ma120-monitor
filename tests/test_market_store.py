@@ -150,6 +150,82 @@ class MarketStoreTests(unittest.TestCase):
             self.assertEqual(db.execute("SELECT COUNT(*) FROM history_versions").fetchone()[0], 1)
 
 
+class HistoryVersionPruneTests(unittest.TestCase):
+    """历史版本不能无限堆积。
+
+    缺陷背景（2026-10-22）：唯一键是 (kind,code,fetched_at,digest)，
+    fetched_at 每次刷新都是新时间戳 → 永远插新行、旧行永不回收。
+    连跑十天、每天刷新几次，每支标的就攒了几十份几乎相同的 809 根日 K，
+    库从 79MB 涨到 308MB。修复后每次写入只保留最近 KEEP_VERSIONS 份。
+    """
+
+    def setUp(self):
+        self.folder = tempfile.TemporaryDirectory()
+        self.addCleanup(self.folder.cleanup)
+        self.path = Path(self.folder.name) / "market.sqlite3"
+        self.store = MarketStore(self.path)
+
+    @staticmethod
+    def _bars(end_day, periods=130):
+        dates = pd.bdate_range(end=end_day, periods=periods)
+        return [[d.date().isoformat(), "10", "10.5", "11", "9", "1000"] for d in dates]
+
+    def _counts(self):
+        with closing(sqlite3.connect(self.path)) as db:
+            versions = db.execute("SELECT COUNT(*) FROM history_versions").fetchone()[0]
+            bars = db.execute("SELECT COUNT(*) FROM daily_bars").fetchone()[0]
+        return versions, bars
+
+    def test_repeated_writes_keep_only_latest_versions(self):
+        for offset in range(8):
+            self.store.put_history("stock", "600900", {"bars": self._bars(date(2026, 10, 21))},
+                                   {"source": "test"},
+                                   fetched_at=f"2026-10-22T{9 + offset:02d}:00:00+08:00")
+        versions, _ = self._counts()
+        self.assertEqual(versions, MarketStore.KEEP_VERSIONS,
+                         "旧版本没有被清理，库会无限膨胀")
+
+    def test_prune_keeps_newest_version_readable(self):
+        for offset in range(5):
+            self.store.put_history("stock", "600900", {"bars": self._bars(date(2026, 10, 21))},
+                                   {"source": "test"},
+                                   fetched_at=f"2026-10-22T{9 + offset:02d}:00:00+08:00")
+        history = self.store.get_history("stock", "600900")
+        self.assertIsNotNone(history)
+        self.assertEqual(len(history["bars"]), 130)
+        self.assertEqual(history["bars"][-1][0], date(2026, 10, 21).isoformat())
+
+    def test_prune_does_not_touch_other_codes(self):
+        self.store.put_history("stock", "600900", {"bars": self._bars(date(2026, 10, 21))},
+                               {"source": "test"}, fetched_at="2026-10-22T09:00:00+08:00")
+        self.store.put_history("stock", "601998", {"bars": self._bars(date(2026, 10, 21))},
+                               {"source": "test"}, fetched_at="2026-10-22T09:00:00+08:00")
+        for offset in range(4):
+            self.store.put_history("stock", "600900", {"bars": self._bars(date(2026, 10, 21))},
+                                   {"source": "test"},
+                                   fetched_at=f"2026-10-22T{10 + offset:02d}:00:00+08:00")
+        self.assertIsNotNone(self.store.get_history("stock", "601998"),
+                             "清理误删了其它标的")
+
+    def test_bulk_prune_reclaims_all_codes(self):
+        # 先把保留数放大，模拟"已经堆了很多版本"的历史库，
+        # 否则写入时就被自动清理了，测不到 prune_history 本身。
+        self.store.KEEP_VERSIONS = 99
+        for code in ("600900", "601998", "000651"):
+            for offset in range(6):
+                self.store.put_history("stock", code,
+                                       {"bars": self._bars(date(2026, 10, 21))},
+                                       {"source": "test"},
+                                       fetched_at=f"2026-10-22T{9 + offset:02d}:00:00+08:00")
+        versions, _ = self._counts()
+        self.assertEqual(versions, 3 * 6)
+
+        removed = self.store.prune_history(keep=2)
+        self.assertGreater(removed, 0)
+        versions, _ = self._counts()
+        self.assertEqual(versions, 3 * 2)
+
+
 class ConcurrentWriteTests(unittest.TestCase):
     """并发写库回归测试（2026-10-22 缺陷）。
 
