@@ -46,7 +46,22 @@ class ConfigurationStore:
     def connect(self):
         db = self.market.connect()
         db.executescript(SCHEMA.read_text(encoding="utf-8"))
+        self._migrate(db)
         return db
+
+    @staticmethod
+    def _migrate(db):
+        """给已存在的库补列。
+
+        schema 里的 `CREATE TABLE IF NOT EXISTS` 只对**新建**表生效，
+        线上库 `watchlist_entries` 已有数据，加列必须显式 ALTER。
+        整段必须幂等：用 PRAGMA table_info 探列，缺什么补什么。
+        """
+        columns = {row[1] for row in db.execute("PRAGMA table_info(watchlist_entries)")}
+        if "starred" not in columns:
+            db.execute("ALTER TABLE watchlist_entries ADD COLUMN starred INTEGER NOT NULL DEFAULT 0")
+        if "note" not in columns:
+            db.execute("ALTER TABLE watchlist_entries ADD COLUMN note TEXT NOT NULL DEFAULT ''")
 
     @staticmethod
     def _meta(db, key):
@@ -167,7 +182,12 @@ class ConfigurationStore:
         for index, item in enumerate(items):
             self._instrument(db, item["code"], item["name"])
             if section == "watchlist":
-                db.execute("INSERT INTO watchlist_entries VALUES (?,?)", (item["code"], index))
+                # 必须显式列名：表已有 starred/note 两列，省略列名的
+                # INSERT 会因列数不匹配而失败。
+                # 用 .get 取默认值，保证旧调用方（不带这两个字段）仍可用。
+                db.execute(
+                    "INSERT INTO watchlist_entries(code,sort_order,starred,note) VALUES (?,?,?,?)",
+                    (item["code"], index, int(bool(item.get("starred"))), item.get("note") or ""))
             else:
                 db.execute("INSERT INTO portfolio_positions VALUES (?,?,?,?)",
                            (item["code"], item["cost"], item["shares"], index))
@@ -175,9 +195,16 @@ class ConfigurationStore:
     @staticmethod
     def _stocks(db, section):
         if section == "watchlist":
-            sql = "SELECT i.code,i.name FROM watchlist_entries e JOIN instruments i ON i.code=e.code ORDER BY e.sort_order,i.code"
-        else:
-            sql = "SELECT i.code,i.name,p.cost,p.shares FROM portfolio_positions p JOIN instruments i ON i.code=p.code ORDER BY p.sort_order,i.code"
+            # starred/note 必须一起读出来：mutate_stocks 走的是
+            # 「读全量 → operation → 全删全插」，漏读就会在任意一次
+            # 重命名/增删时把标记静默抹掉。
+            sql = ("SELECT i.code,i.name,e.starred,e.note "
+                   "FROM watchlist_entries e JOIN instruments i ON i.code=e.code "
+                   "ORDER BY e.sort_order,i.code")
+            return [{"code": row["code"], "name": row["name"],
+                     "starred": bool(row["starred"]), "note": row["note"]}
+                    for row in db.execute(sql)]
+        sql = "SELECT i.code,i.name,p.cost,p.shares FROM portfolio_positions p JOIN instruments i ON i.code=p.code ORDER BY p.sort_order,i.code"
         return [dict(row) for row in db.execute(sql)]
 
     def stocks(self, section):

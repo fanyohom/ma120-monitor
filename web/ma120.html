@@ -36,7 +36,7 @@
         <button class="tab" type="button" data-scope="portfolio" role="tab" aria-selected="false">持仓</button>
         <button class="tab" type="button" data-scope="watchlist" role="tab" aria-selected="false">关注池</button>
       </div>
-      <div class="stock-controls"><label class="sr-only" for="stockSearch">搜索股票</label><input id="stockSearch" type="search" placeholder="搜索名称或代码"><label class="sr-only" for="stockFilter">状态筛选</label><select id="stockFilter"><option value="all">全部状态</option><option value="signal_only">只看今日信号</option><option value="buy">今日买入信号</option><option value="sell">今日卖出信号</option><option value="below_buy">低于买入线</option><option value="above_sell">高于卖出线</option><option value="between">区间内</option><option value="unavailable">数据待补</option></select><label class="sr-only" for="stockSort">排序方式</label><select id="stockSort"><option value="signal">状态 · 信号优先</option><option value="buy">状态 · 买入优先</option><option value="sell">状态 · 卖出优先</option><option value="deviation">状态 · 偏离程度</option><option value="code">代码顺序</option></select></div>
+      <div class="stock-controls"><label class="sr-only" for="stockSearch">搜索股票</label><input id="stockSearch" type="search" placeholder="搜索名称或代码"><label class="sr-only" for="stockFilter">状态筛选</label><select id="stockFilter"><option value="all">全部状态</option><option value="signal_only">只看今日信号</option><option value="starred">只看特殊关注</option><option value="buy">今日买入信号</option><option value="sell">今日卖出信号</option><option value="below_buy">低于买入线</option><option value="above_sell">高于卖出线</option><option value="between">区间内</option><option value="unavailable">数据待补</option></select><label class="sr-only" for="stockSort">排序方式</label><select id="stockSort"><option value="signal">状态 · 信号优先</option><option value="buy">状态 · 买入优先</option><option value="sell">状态 · 卖出优先</option><option value="deviation">状态 · 偏离程度</option><option value="code">代码顺序</option></select></div>
     </div>
 
     <div class="section-title stock-list-head"><div><h2>监控清单</h2><p id="stockCountLabel">等待行情</p></div><span id="stockRulePill" class="subtle-pill">MA120 × 0.88 / 1.12</span></div>
@@ -71,6 +71,23 @@
     </section>
   </main>
 
+  <dialog id="markDialog" class="watchlist-dialog stock-mark-dialog" aria-labelledby="markTitle">
+    <div class="watchlist-dialog-inner">
+      <div class="dialog-head"><div><h2 id="markTitle">特殊关注</h2><p id="markSubtitle">—</p></div><button id="markClose" class="icon-btn" type="button" aria-label="关闭特殊关注设置">×</button></div>
+      <form id="markForm">
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#42585c;margin-bottom:12px">
+          <input id="markStarred" type="checkbox" style="width:15px;height:15px"> 标记为特殊关注
+        </label>
+        <label style="display:block;font-size:12px;color:#5d7276;margin-bottom:6px">关注理由（选填，最多 200 字）</label>
+        <textarea id="markNote" class="stock-mark-note" maxlength="200" placeholder="如：周期底部、分红稳定、等待跌破买入线"></textarea>
+        <p id="markFeedback" class="watchlist-feedback" role="status" aria-live="polite" hidden></p>
+        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">
+          <button id="markCancel" class="ghost-btn" type="button">取消</button>
+          <button class="primary-btn" type="submit">保存</button>
+        </div>
+      </form>
+    </div>
+  </dialog>
   <dialog id="watchlistDialog" class="watchlist-dialog" aria-labelledby="watchlistTitle">
     <div class="watchlist-dialog-inner">
       <div class="dialog-head"><div><h2 id="watchlistTitle">管理关注池</h2><p>修改保存在 SQLite；持仓和 ETF 计划可在配置管理页维护。</p></div><button id="watchlistClose" class="icon-btn" type="button" aria-label="关闭关注池管理">×</button></div>

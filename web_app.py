@@ -465,7 +465,7 @@ class StockDashboardService:
         with self.lock:
             return {"items": read_watchlist(self.watchlist_path)}
 
-    def _change_watchlist(self, operation):
+    def _change_watchlist(self, operation, refresh=True):
         with self.lock:
             if self.watchlist_path is None:
                 updated = ConfigurationStore().mutate_stocks("watchlist", operation)
@@ -485,8 +485,29 @@ class StockDashboardService:
         result = {"items": updated}
         if self._refresh_error:
             result["refresh_warning"] = f"关注池已保存，行情刷新失败：{self._refresh_error}"
-        self._schedule_async_refresh()
+        if refresh:
+            self._schedule_async_refresh()
         return result
+
+    def _patch_snapshot_marks(self, code, starred, note):
+        """把星标/备注就地合并进当前快照。
+
+        标记是纯配置变更，不影响任何行情或均线计算，
+        因此不必等后台全量重建（那要好秒级）。这里复制一份快照
+        并只改目标行，读侧拿到的仍是完整对象。
+        """
+        with self._snapshot_lock:
+            snapshot = self.snapshot
+            if snapshot is None:
+                return
+            rows = []
+            for row in snapshot.get("watchlist", []):
+                rows.append({**row, "starred": starred, "note": note}
+                            if row.get("code") == code else row)
+            self.snapshot = {**snapshot, "watchlist": rows}
+            patched = self.snapshot
+        if self.store:
+            self.store.put_dashboard("ma120", patched)
 
     def add_watchlist(self, payload):
         code = normalize_code(payload.get("code"))
@@ -509,6 +530,46 @@ class StockDashboardService:
             return [{**item, "name": name} if item["code"] == code else item for item in items]
 
         return self._change_watchlist(rename)
+
+    def mark_watchlist(self, code, payload):
+        """设置「特殊关注」星标与备注。
+
+        只传 starred 时保留原备注，只传 note 时保留原星标，
+        都传则一起更新 —— 前端两种场景（点星标 / 改备注）都能复用同一接口。
+        """
+        code = normalize_code(code)
+        if "starred" not in payload and "note" not in payload:
+            raise ValueError("需要提供 starred 或 note")
+        starred = payload.get("starred")
+        note = payload.get("note")
+        if starred is not None and not isinstance(starred, bool):
+            raise ValueError("starred 必须是布尔值")
+        if note is not None and not isinstance(note, str):
+            raise ValueError("note 必须是字符串")
+
+        def mark(items):
+            if not any(item["code"] == code for item in items):
+                raise LookupError("股票不在关注池中")
+            updated = []
+            for item in items:
+                if item["code"] != code:
+                    updated.append(item)
+                    continue
+                entry = {**item}
+                if starred is not None:
+                    entry["starred"] = starred
+                if note is not None:
+                    entry["note"] = note
+                updated.append(entry)
+            return updated
+
+        # 标记不影响行情，跳过全量重算，改为本地合并进快照——
+        # 否则点一次星标要等数秒行情刷新，前端还会读到旧快照、徽章不出现。
+        result = self._change_watchlist(mark, refresh=False)
+        saved = next((item for item in result["items"] if item["code"] == code), None)
+        if saved is not None:
+            self._patch_snapshot_marks(code, bool(saved.get("starred")), saved.get("note") or "")
+        return result
 
     def remove_watchlist(self, code):
         code = normalize_code(code)
@@ -769,7 +830,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
             elif parsed.path == "/api/configuration/portfolio":
                 result = self.configuration_service.position(self._read_json(), self._watchlist_code(parsed.query))
             else:
-                result = self.stock_service.rename_watchlist(self._watchlist_code(parsed.query), self._read_json())
+                payload = self._read_json()
+                code = self._watchlist_code(parsed.query)
+                # 同一个 PATCH 入口承载两种语义：改名称 vs 改星标/备注。
+                # 用 payload 里出现哪些键来区分，避免再加一个端点，
+                # 也让旧的「只传 name」调用完全不受影响。
+                if isinstance(payload, dict) and ("starred" in payload or "note" in payload):
+                    result = self.stock_service.mark_watchlist(code, payload)
+                else:
+                    result = self.stock_service.rename_watchlist(code, payload)
             if parsed.path.startswith("/api/configuration/"):
                 self.stock_service.snapshot = None
             self._json(200, result)

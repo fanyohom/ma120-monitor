@@ -35,11 +35,12 @@ def normalize_code(value):
 def _validate_items(items):
     if not isinstance(items, list):
         raise WatchlistError("watchlist.items 必须是数组")
+    allowed = {"code", "name", "starred", "note"}
     normalized = []
     seen = set()
     for index, item in enumerate(items, start=1):
-        if not isinstance(item, dict) or set(item) != {"code", "name"}:
-            raise WatchlistError(f"第 {index} 项必须包含 code 和 name")
+        if not isinstance(item, dict) or not {"code", "name"} <= set(item) <= allowed:
+            raise WatchlistError(f"第 {index} 项必须包含 code 和 name，且只能额外带 starred、note")
         code = normalize_code(item["code"])
         name = item["name"]
         if not isinstance(name, str) or not name.strip():
@@ -47,7 +48,26 @@ def _validate_items(items):
         if code in seen:
             raise WatchlistError(f"重复的股票代码：{code}")
         seen.add(code)
-        normalized.append({"code": code, "name": name.strip()})
+        entry = {"code": code, "name": name.strip()}
+        # 「特殊关注」是关注池专属字段。只在有值时写出，
+        # 这样既保持 watchlist.json 的旧格式兼容，
+        # 也让「未标记」的标的不会多出两个冗余键。
+        starred = item.get("starred")
+        if starred is not None:
+            if not isinstance(starred, bool):
+                raise WatchlistError(f"第 {index} 项 starred 必须是布尔值")
+            if starred:
+                entry["starred"] = True
+        note = item.get("note")
+        if note is not None:
+            if not isinstance(note, str):
+                raise WatchlistError(f"第 {index} 项 note 必须是字符串")
+            note = note.strip()
+            if len(note) > 200:
+                raise WatchlistError(f"第 {index} 项备注不能超过 200 字")
+            if note:
+                entry["note"] = note
+        normalized.append(entry)
     return normalized
 
 

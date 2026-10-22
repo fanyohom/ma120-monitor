@@ -10,7 +10,11 @@ CREATE TABLE IF NOT EXISTS instruments (
 );
 CREATE TABLE IF NOT EXISTS watchlist_entries (
     code TEXT PRIMARY KEY REFERENCES instruments(code) ON DELETE RESTRICT,
-    sort_order INTEGER NOT NULL CHECK(sort_order >= 0)
+    sort_order INTEGER NOT NULL CHECK(sort_order >= 0),
+    -- 特殊关注：1=已标记。仅关注池使用，持仓表不加。
+    starred INTEGER NOT NULL DEFAULT 0 CHECK(starred IN (0,1)),
+    -- 标记理由，让日后的自己知道当初为什么盯它。
+    note TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS portfolio_positions (
     code TEXT PRIMARY KEY REFERENCES instruments(code) ON DELETE RESTRICT,
