@@ -12,6 +12,8 @@ let estimateCode = null;
 const stockHistoryCache = new Map();
 let watchlistItems = [];
 let watchlistBusy = false;
+let markTarget = null;
+let markBusy = false;
 
 function cell(row, value, className = '') {
   const td = document.createElement('td');
@@ -73,6 +75,54 @@ function watchlistFeedback(message, error = false) {
   status.textContent = message;
   status.className = `watchlist-feedback${error ? ' error' : ''}`;
   status.hidden = !message;
+}
+
+function markFeedback(message, error = false) {
+  const status = $('markFeedback');
+  status.textContent = message;
+  status.className = `watchlist-feedback${error ? ' error' : ''}`;
+  status.hidden = !message;
+}
+
+function setMarkBusy(busy) {
+  markBusy = busy;
+  $('markDialog').querySelectorAll('button, input, textarea').forEach((control) => { control.disabled = busy; });
+}
+
+function openMarkDialog(item) {
+  if (markBusy) return;
+  markTarget = item;
+  $('markSubtitle').textContent = `${item.name} · ${item.code}`;
+  $('markStarred').checked = Boolean(item.starred);
+  $('markNote').value = item.note || '';
+  markFeedback('');
+  setMarkBusy(false);
+  $('markDialog').showModal();
+  $('markNote').focus();
+}
+
+async function saveMark() {
+  if (markBusy || !markTarget) return;
+  const starred = $('markStarred').checked;
+  const note = $('markNote').value.trim();
+  setMarkBusy(true);
+  markFeedback('正在保存...');
+  try {
+    await watchlistRequest('PATCH',
+      `/api/ma120/watchlist?code=${encodeURIComponent(markTarget.code)}`, {starred, note});
+    $('markDialog').close();
+    // 标记只是配置变更，不触发行情重算；直接重读快照即可让徽章生效。
+    try {
+      const updated = await request('/api/ma120');
+      if (updated.snapshot) render(updated.snapshot);
+    } catch (error) {
+      notice(`标记已保存，但列表刷新失败：${error.message}`, true);
+    }
+  } catch (error) {
+    markFeedback(error.message, true);
+  } finally {
+    setMarkBusy(false);
+  }
 }
 
 function setWatchlistBusy(busy) {
@@ -231,14 +281,19 @@ function rowsForScope() {
   return rows.filter((row) => {
     if (query && !`${row.name} ${row.code}`.toLowerCase().includes(query)) return false;
     if (filter === 'all') return true;
+    if (filter === 'starred') return Boolean(row.starred);
     if (filter === 'signal_only') return row.signal === 'buy' || row.signal === 'sell';
     if (filter === 'unavailable') return Boolean(row.error);
     if (filter === 'buy' || filter === 'sell') return row.signal === filter;
     return row.zone === filter;
   }).sort((left, right) => {
-    if (sort === 'code') return left.code.localeCompare(right.code);
-    if (sort === 'deviation') return deviationTiebreak(left) - deviationTiebreak(right) || left.code.localeCompare(right.code);
-    return ranks[sort][statusKey(left)] - ranks[sort][statusKey(right)]
+    // 特殊关注始终优先 —— 用户标它的目的就是「别被别的标的淹掉」，
+    // 因此在任何排序模式下都作为第一排序键。
+    const starDiff = (right.starred ? 1 : 0) - (left.starred ? 1 : 0);
+    if (sort === 'code') return starDiff || left.code.localeCompare(right.code);
+    if (sort === 'deviation') return starDiff || deviationTiebreak(left) - deviationTiebreak(right) || left.code.localeCompare(right.code);
+    return starDiff
+      || ranks[sort][statusKey(left)] - ranks[sort][statusKey(right)]
       || deviationTiebreak(left) - deviationTiebreak(right)
       || left.code.localeCompare(right.code);
   });
@@ -303,7 +358,16 @@ function renderRows() {
     const name = document.createElement('a');
     name.href = `/ma120/${encodeURIComponent(item.code)}`;
     name.className = 'stock-name';
-    name.textContent = item.name;
+    if (item.starred) {
+      // 星标放在名称单元格内部，不新增 <td>。
+      // 移动端布局用 nth-child 精确定位每列，多一列会整体错位。
+      const star = document.createElement('span');
+      star.className = 'stock-star';
+      star.textContent = '★';
+      star.title = item.note ? `特殊关注：${item.note}` : '特殊关注';
+      name.append(star);
+    }
+    name.append(document.createTextNode(item.name));
     name.addEventListener('click', (event) => {
       event.stopPropagation();
       if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
@@ -317,6 +381,27 @@ function renderRows() {
     section.className = 'stock-section';
     section.textContent = item.section === 'portfolio' ? '持仓' : '关注';
     nameCell.append(name, code, section);
+    if (item.starred && item.note) {
+      const note = document.createElement('span');
+      note.className = 'stock-note';
+      note.textContent = item.note;
+      note.title = item.note;
+      nameCell.append(note);
+    }
+    if (item.section === 'watchlist') {
+      const mark = document.createElement('button');
+      mark.type = 'button';
+      mark.className = `stock-mark-btn${item.starred ? ' starred' : ''}`;
+      mark.textContent = item.starred ? '★' : '☆';
+      mark.title = item.starred ? '编辑特殊关注' : '设为特殊关注';
+      mark.setAttribute('aria-label', mark.title);
+      mark.addEventListener('click', (event) => {
+        event.stopPropagation();
+        openMarkDialog(item);
+      });
+      nameCell.append(mark);
+    }
+    if (item.starred) tr.className = 'stock-starred-row';
     tr.append(nameCell);
     const priceCell = cell(tr, item.price == null ? '—' : number(item.price), 'stock-number');
     if (item.price_date) {
@@ -737,6 +822,13 @@ $('stockEstimateForm').addEventListener('submit', (event) => { event.preventDefa
 $('stockEstimateDate').addEventListener('change', loadStockEstimate);
 $('watchlistManage').addEventListener('click', openWatchlist);
 $('watchlistClose').addEventListener('click', () => $('watchlistDialog').close());
+$('markClose').addEventListener('click', () => $('markDialog').close());
+$('markCancel').addEventListener('click', () => $('markDialog').close());
+$('markForm').addEventListener('submit', (event) => { event.preventDefault(); saveMark(); });
+// 勾掉「特殊关注」时清空理由，避免留下孤立的备注。
+$('markStarred').addEventListener('change', (event) => {
+  if (!event.target.checked) $('markNote').value = '';
+});
 $('watchlistAdd').addEventListener('submit', (event) => {
   event.preventDefault();
   const code = $('watchlistCode').value.trim().toUpperCase();

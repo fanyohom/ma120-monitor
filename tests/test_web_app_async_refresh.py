@@ -606,6 +606,74 @@ class WatchlistRegressionTests(AsyncWatchlistTestCase):
         self.assertEqual(self.request(self.port, "GET", "/api/ma120/watchlist")[1],
                          {"items": []})
 
+    def test_mark_star_round_trip_and_rename_keeps_it(self):
+        """PATCH 同一个入口按 payload 键分发：starred/note 走标记，name 走改名。
+
+        关键回归：改名（全删全插）不能把星标抹掉。
+        """
+        headers = self.json_headers()
+        code = legal_code(14)
+        self.assertEqual(self.add_code(self.port, code, "初始名称")[0], 200)
+
+        status, payload = self.request(
+            self.port, "PATCH", f"/api/ma120/watchlist?code={code}",
+            {"starred": True, "note": "股息稳定"}, headers)
+        self.assertEqual(status, 200)
+        saved = next(item for item in payload["items"] if item["code"] == code)
+        self.assertTrue(saved["starred"])
+        self.assertEqual(saved["note"], "股息稳定")
+
+        # 改名后星标必须还在
+        status, payload = self.request(
+            self.port, "PATCH", f"/api/ma120/watchlist?code={code}",
+            {"name": "新名称"}, headers)
+        self.assertEqual(status, 200)
+        saved = next(item for item in payload["items"] if item["code"] == code)
+        self.assertEqual(saved["name"], "新名称")
+        self.assertTrue(saved["starred"], "改名把星标抹掉了")
+        self.assertEqual(saved["note"], "股息稳定")
+
+        # 只改备注，星标保留
+        status, payload = self.request(
+            self.port, "PATCH", f"/api/ma120/watchlist?code={code}",
+            {"note": "改了理由"}, headers)
+        self.assertEqual(status, 200)
+        saved = next(item for item in payload["items"] if item["code"] == code)
+        self.assertTrue(saved["starred"])
+        self.assertEqual(saved["note"], "改了理由")
+
+        # 取消星标并清空备注
+        status, payload = self.request(
+            self.port, "PATCH", f"/api/ma120/watchlist?code={code}",
+            {"starred": False, "note": ""}, headers)
+        self.assertEqual(status, 200)
+        saved = next(item for item in payload["items"] if item["code"] == code)
+        # 取消后字段被省略（默认值不写出，保持 watchlist.json 旧格式兼容），
+        # 因此用 .get 断言"不是 True"而不是要求键存在。
+        self.assertFalse(saved.get("starred"))
+        self.assertFalse(saved.get("note"))
+
+    def test_mark_rejects_bad_payload_and_missing_code(self):
+        headers = self.json_headers()
+        code = legal_code(15)
+        self.assertEqual(self.add_code(self.port, code)[0], 200)
+
+        # 空 payload：既不是改名也不是标记
+        self.assertEqual(self.request(
+            self.port, "PATCH", f"/api/ma120/watchlist?code={code}",
+            {}, headers)[0], 400)
+        # 类型错误
+        self.assertEqual(self.request(
+            self.port, "PATCH", f"/api/ma120/watchlist?code={code}",
+            {"starred": "yes"}, headers)[0], 400)
+        self.assertEqual(self.request(
+            self.port, "PATCH", f"/api/ma120/watchlist?code={code}",
+            {"note": 5}, headers)[0], 400)
+        # 不存在的标的
+        self.assertEqual(self.request(
+            self.port, "PATCH", f"/api/ma120/watchlist?code={legal_code(16)}",
+            {"starred": True}, headers)[0], 404)
+
     def test_add_duplicate_and_missing_are_rejected(self):
         """重复添加返回 400，操作不存在的标的返回 404。"""
         headers = self.json_headers()

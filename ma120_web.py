@@ -147,6 +147,9 @@ def _row(item, *, portfolio, hist_loader, quote_loader, today):
     row = {
         "code": item["code"],
         "name": item["name"],
+        # 「特殊关注」仅关注池使用；持仓行恒为 False，前端据此不渲染徽章。
+        "starred": bool(item.get("starred")) if not portfolio else False,
+        "note": (item.get("note") or "") if not portfolio else "",
         "currency": "HKD" if monitor._is_hk_code(item["code"]) else "CNY",
         "price": None,
         "price_source": None,
