@@ -20,6 +20,7 @@ MA120 持仓 & 关注池监控（Sina 数据源）
 """
 
 import json
+import logging
 import os
 import sys
 import time
@@ -295,6 +296,25 @@ def _merge_bars(fallback: pd.DataFrame, df: pd.DataFrame) -> pd.DataFrame:
     return merged
 
 
+def _store_history(stock_code: str, df: pd.DataFrame) -> None:
+    """把日 K 写入本地库。写失败不应影响本次返回值。
+
+    历史教训（2026-10-22）：写库失败曾被外层宽 except 吞掉，
+    导致「联网拉到了新数据」却被当成「拉取失败」，
+    静默回退到旧行情 —— 页面显示正常，实际用的是过期数据，
+    当日买入/卖出信号被无声清空，且日志里没有任何异常。
+
+    写库只是持久化，失败时保留内存中的新数据继续用，
+    同时记一条 warning 让问题可见。
+    """
+    try:
+        _write_cache(stock_code, df)
+    except Exception as exc:  # noqa: BLE001
+        logging.getLogger(__name__).warning(
+            "日K 写库失败（%s）：%s: %s，本次仍使用已拉取的数据", stock_code,
+            type(exc).__name__, exc)
+
+
 def get_stock_hist_data(stock_code: str, days: int | None = None, force: bool = False,
                         database_only: bool = False) -> pd.DataFrame:
     """获取前复权日 K：A 股使用新浪，港股使用腾讯。"""
@@ -341,7 +361,7 @@ def get_stock_hist_data(stock_code: str, days: int | None = None, force: bool = 
             if not _newer_than(df, fallback):
                 return fallback
             df = _merge_bars(fallback, df)
-            _write_cache(stock_code, df)
+            _store_history(stock_code, df)
             return df
 
         symbol = _sina_symbol(stock_code)
@@ -360,9 +380,14 @@ def get_stock_hist_data(stock_code: str, days: int | None = None, force: bool = 
         if not _newer_than(df, fallback):
             return fallback
         df = _merge_bars(fallback, df)
-        _write_cache(stock_code, df)
+        _store_history(stock_code, df)
         return df
-    except Exception:
+    except Exception as exc:
+        # 只有「联网拉取本身」失败才回退旧数据。
+        # 写库失败已由 _store_history() 单独兜住，不会走到这里。
+        logging.getLogger(__name__).warning(
+            "日K 拉取失败（%s）：%s: %s，回退到本地缓存", stock_code,
+            type(exc).__name__, exc)
         if not fallback.empty:
             fallback.attrs["data_stale"] = True
         return fallback
