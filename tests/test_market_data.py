@@ -22,6 +22,40 @@ class MarketDataTests(unittest.TestCase):
         self.store_patch.start()
         self.addCleanup(self.store_patch.stop)
 
+    def test_database_only_read_of_today_data_is_not_stale(self):
+        """database_only 只表示「不联网」，不代表数据陈旧。
+
+        回归背景（2026-10-23）：这里曾有
+            if database_only and cached is not None:
+                cached.attrs["data_stale"] = True
+        的无条件覆盖，把 _read_cache() 按 fetched_at 算出的新鲜度抹掉了。
+        后果很隐蔽：服务一重启，即使库里是当天 11:30 刚抓的日 K，
+        整张表也被判成「数据库历史行情」，当日买卖信号被全部清空，
+        用户必须手动点刷新才恢复。
+        """
+        store = MarketStore(Path(self.database_folder.name) / "market.sqlite3")
+        dates = pd.bdate_range(end="2026-10-22", periods=130)
+        rows = [[d.date().isoformat(), "10", "10.5", "11", "9", "1000"] for d in dates]
+        store.put_history("stock", "600900", {"bars": rows}, {"source": "test"})
+
+        bars = monitor.get_stock_hist_data("600900", database_only=True)
+        self.assertEqual(len(bars), 130)
+        self.assertFalse(bars.attrs.get("data_stale"),
+                         "当天入库的数据被误判为陈旧，信号会被静默清空")
+
+    def test_database_only_read_of_old_data_is_stale(self):
+        """反过来：库里的数据确实不是今天的，仍必须标记陈旧。"""
+        store = MarketStore(Path(self.database_folder.name) / "market.sqlite3")
+        dates = pd.bdate_range(end="2026-09-30", periods=130)
+        rows = [[d.date().isoformat(), "10", "10.5", "11", "9", "1000"] for d in dates]
+        store.put_history("stock", "600900", {"bars": rows}, {"source": "test"},
+                          fetched_at="2026-09-30T15:00:00+08:00")
+
+        bars = monitor.get_stock_hist_data("600900", database_only=True)
+        self.assertEqual(len(bars), 130)
+        self.assertTrue(bars.attrs.get("data_stale"),
+                        "过期数据必须标记陈旧，否则会用它生成当日信号")
+
     @patch("stock_dynamic_monitor.requests.get")
     @patch("stock_dynamic_monitor._write_cache")
     @patch("stock_dynamic_monitor._read_cache")

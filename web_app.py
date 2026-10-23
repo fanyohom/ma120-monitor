@@ -354,6 +354,8 @@ class StockDashboardService:
         self._refresh_gate = threading.Lock()
         # 脏标记：写请求置位、后台线程消费，保证重建期间的新写入不会被丢弃。
         self._dirty = threading.Event()
+        # TTL 过期/冷启动时置位，让下一轮后台刷新顺便联网补实时行情。
+        self._live_quotes_pending = False
         self._refresh_thread = None
         # 最近一次后台刷新失败的原因；成功刷新后清空。
         # 写请求已返回，无法同步得知本次刷新结果，故由「下一次写请求」捎带告知，
@@ -362,15 +364,26 @@ class StockDashboardService:
         self.database_mode = loader is build_ma120_dashboard
         self.store = MarketStore(database_path or database_for_cache(monitor.CACHE_DIR)) if self.database_mode or database_path else None
 
-    def _build_snapshot(self, force: bool = False):
-        """构建全量快照。不持有 self.lock，调用方自行决定并发策略。"""
+    def _build_snapshot(self, force: bool = False, live_quotes: bool = False):
+        """构建全量快照。不持有 self.lock，调用方自行决定并发策略。
+
+        三种模式：
+        - force=True   联网重拉日 K + 实时行情（最慢，写库）
+        - live_quotes  日 K 读库 + **实时行情联网**（快，用于 TTL 过期后自愈）
+        - 默认         全部 database_only（最快，纯离线；但价格是上一交易日收盘）
+        """
         if not self.database_mode:
             return self.loader()
         if force:
             return build_ma120_dashboard(hist_loader=lambda code:
                                          monitor.get_stock_hist_data(code, days=HISTORY_FETCH_BARS, force=True))
+        hist = lambda code: monitor.get_stock_hist_data(code, database_only=True)
+        if live_quotes:
+            return build_ma120_dashboard(
+                hist_loader=hist,
+                quote_loader=lambda code: monitor.get_stock_realtime_quote(code))
         return build_ma120_dashboard(
-            hist_loader=lambda code: monitor.get_stock_hist_data(code, database_only=True),
+            hist_loader=hist,
             quote_loader=lambda code: monitor.get_stock_realtime_quote(code, database_only=True))
 
     def _snapshot_expired(self) -> bool:
@@ -385,12 +398,21 @@ class StockDashboardService:
     def current(self):
         # 快照锁只用于读取/替换，不覆盖重建过程，读接口不会被后台刷新拖住。
         with self._snapshot_lock:
-            if self._snapshot_expired():
-                self.snapshot = None
+            expired = self._snapshot_expired()
             snapshot = self.snapshot
+        if expired:
+            # 过期时**不要**丢弃旧快照。弃用它会让 current() 调
+            # _build_snapshot()（不联网）重建，整表退回上一交易日收盘、
+            # 全部标记为「数据库历史行情」—— 比「稍旧的实时价」更糟，
+            # 而且用户会以为服务坏了。改为保留旧值 + 后台补拉实时行情。
+            self._schedule_async_refresh(live_quotes=True)
         if snapshot is None:
             if self.database_mode:
                 snapshot = self._build_snapshot()
+                # 冷启动（进程刚起 / 重启后）只读库是为了让页面秒开，
+                # 但价格是上一交易日收盘。立刻补一轮实时行情，
+                # 否则用户打开页面看到的是全表"历史行情"。
+                self._schedule_async_refresh(live_quotes=True)
             elif self.store:
                 # 非数据库模式只读已持久化的快照，不主动调用 loader
                 snapshot = self.store.get_dashboard("ma120")
@@ -431,7 +453,10 @@ class StockDashboardService:
                 if self._dirty.wait(self.ASYNC_REFRESH_DELAY):
                     continue  # 窗口内又有新写入，重置窗口继续等
                 break
-            snapshot = self._build_snapshot()
+            # TTL 过期触发的刷新要顺便补实时行情；
+            # 由写请求触发的普通刷新不需要（写操作不改行情）。
+            snapshot = self._build_snapshot(live_quotes=self._live_quotes_pending)
+            self._live_quotes_pending = False
             # 整体替换而非原地修改，读侧只会看到完整的旧值或新值
             with self._snapshot_lock:
                 self.snapshot = snapshot
@@ -448,11 +473,14 @@ class StockDashboardService:
             if self._dirty.is_set():
                 self._schedule_async_refresh()
 
-    def _schedule_async_refresh(self):
+    def _schedule_async_refresh(self, live_quotes=False):
         """标记脏并确保后台刷新线程在运行（同一时刻最多一个）。
 
         调用方立即返回，不等待重建；本方法不做任何阻塞等待。
+        live_quotes=True 时顺带联网补一轮实时行情。
         """
+        if live_quotes:
+            self._live_quotes_pending = True
         self._dirty.set()
         with self._refresh_gate:
             # 存活判断与赋值都在锁内完成，并发写请求只有一个能启动线程，
