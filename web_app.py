@@ -4,6 +4,7 @@ import argparse
 import json
 import logging
 import sqlite3
+import sys
 import threading
 from contextlib import closing
 from datetime import date, datetime, timedelta
@@ -882,11 +883,22 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--log-file", default=None,
+                        help="把输出与日志写入该文件（后台无窗口启动时需要）")
     args = parser.parse_args()
     if args.host not in ("127.0.0.1", "localhost"):
         parser.error("无登录服务只允许监听 127.0.0.1 或 localhost")
+    if args.log_file:
+        # pythonw.exe（无控制台）下 sys.stdout 是 None，
+        # 直接 print() 会抛 AttributeError。后台启动必须先把输出接到文件。
+        handle = open(args.log_file, "a", encoding="utf-8", buffering=1)
+        sys.stdout = handle
+        sys.stderr = handle
+        logging.basicConfig(stream=handle, level=logging.INFO,
+                            format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     server = ThreadingHTTPServer((args.host, args.port), DashboardHandler)
     print(f"ETF dashboard: http://{args.host}:{server.server_port}", flush=True)
+    logging.getLogger(__name__).info("服务已启动 %s:%s", args.host, server.server_port)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
