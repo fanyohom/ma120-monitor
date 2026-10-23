@@ -320,8 +320,14 @@ def get_stock_hist_data(stock_code: str, days: int | None = None, force: bool = 
     """获取前复权日 K：A 股使用新浪，港股使用腾讯。"""
     days = DATA_DAYS if days is None else days
     cached = _read_cache(stock_code, allow_stale=True) if database_only else _read_cache(stock_code)
-    if database_only and cached is not None:
-        cached.attrs["data_stale"] = True
+    # 注意：database_only 只表示「不联网」，**不代表数据陈旧**。
+    # 是否陈旧由 _read_cache() 按 fetched_at 是否当天判定（它会设置
+    # data_stale）。
+    #
+    # 这里曾有 `if database_only and cached is not None: cached.attrs["data_stale"] = True`
+    # 的无条件覆盖，后果很隐蔽：只要服务重启，即使库里的日 K 就是当天
+    # 11:30 刚抓的，整表也被判成「数据库历史行情」，当日买卖信号被全部清空，
+    # 用户必须手动点刷新才恢复。2026-10-23 修复。
     required_rows = MA_LONG if days <= DATA_DAYS else days
     if cached is not None and len(cached) >= required_rows and not force:
         return cached
