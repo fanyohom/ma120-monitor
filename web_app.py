@@ -5,6 +5,7 @@ import json
 import logging
 import sqlite3
 import sys
+from email.utils import formatdate
 import threading
 from contextlib import closing
 from datetime import date, datetime, timedelta
@@ -728,10 +729,27 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_error(404)
             return
         filename, content_type = assets[path]
-        body = (WEB_DIR / filename).read_bytes()
+        target = WEB_DIR / filename
+        body = target.read_bytes()
+        # 静态资源必须支持「更新后立刻生效」。
+        #
+        # 这里原本只发 Content-Type / Content-Length，没有任何缓存校验头，
+        # 浏览器会凭启发式规则自己缓存 —— 改完 ma120.js 后刷新页面仍是旧的，
+        # 表现为「新加的功能看不到」，排查时极易被误判成没部署成功。
+        # 现在发 Last-Modified + no-cache（每次都回来校验），命中就回 304。
+        last_modified = int(target.stat().st_mtime)
+        stamp = formatdate(last_modified, usegmt=True)
+        if self.headers.get("If-Modified-Since") == stamp:
+            self.send_response(304)
+            self.send_header("Last-Modified", stamp)
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            return
         self.send_response(200)
         self.send_header("Content-Type", f"{content_type}; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("Last-Modified", stamp)
+        self.send_header("Cache-Control", "no-cache")
         self.end_headers()
         self.wfile.write(body)
 

@@ -1,0 +1,251 @@
+{
+  "version": 1,
+  "items": [
+    {
+      "code": "601998",
+      "name": "中信银行",
+      "starred": true,
+      "note": "红利·银行"
+    },
+    {
+      "code": "000960",
+      "name": "锡业股份",
+      "starred": false,
+      "note": ""
+    },
+    {
+      "code": "002714",
+      "name": "牧原股份",
+      "starred": false,
+      "note": ""
+    },
+    {
+      "code": "600900",
+      "name": "长江电力",
+      "starred": true,
+      "note": "红利·水电"
+    },
+    {
+      "code": "600036",
+      "name": "招商银行",
+      "starred": true,
+      "note": "红利·银行"
+    },
+    {
+      "code": "601166",
+      "name": "兴业银行",
+      "starred": true,
+      "note": "红利·银行"
+    },
+    {
+      "code": "000651",
+      "name": "格力电器",
+      "starred": true,
+      "note": "红利·家电"
+    },
+    {
+      "code": "600030",
+      "name": "中信证券",
+      "starred": false,
+      "note": ""
+    },
+    {
+      "code": "600887",
+      "name": "伊利股份",
+      "starred": true,
+      "note": "红利·食品"
+    },
+    {
+      "code": "600886",
+      "name": "国投电力",
+      "starred": true,
+      "note": "红利·电力"
+    },
+    {
+      "code": "600377",
+      "name": "宁沪高速",
+      "starred": true,
+      "note": "红利·高速"
+    },
+    {
+      "code": "601601",
+      "name": "中国太保",
+      "starred": false,
+      "note": ""
+    },
+    {
+      "code": "601600",
+      "name": "中国铝业",
+      "starred": false,
+      "note": ""
+    },
+    {
+      "code": "002747",
+      "name": "埃斯顿",
+      "starred": false,
+      "note": ""
+    },
+    {
+      "code": "002050",
+      "name": "三花智控",
+      "starred": false,
+      "note": ""
+    },
+    {
+      "code": "601328",
+      "name": "交通银行",
+      "starred": true,
+      "note": "红利·银行"
+    },
+    {
+      "code": "601088",
+      "name": "中国神华",
+      "starred": true,
+      "note": "红利·煤炭"
+    },
+    {
+      "code": "600584",
+      "name": "长电科技",
+      "starred": false,
+      "note": ""
+    },
+    {
+      "code": "300760",
+      "name": "迈瑞医疗",
+      "starred": false,
+      "note": ""
+    },
+    {
+      "code": "600276",
+      "name": "恒瑞医药",
+      "starred": false,
+      "note": ""
+    },
+    {
+      "code": "002223",
+      "name": "鱼跃医疗",
+      "starred": false,
+      "note": ""
+    },
+    {
+      "code": "002837",
+      "name": "英维克",
+      "starred": false,
+      "note": ""
+    },
+    {
+      "code": "600989",
+      "name": "宝丰能源",
+      "starred": false,
+      "note": ""
+    },
+    {
+      "code": "600015",
+      "name": "华夏银行",
+      "starred": true,
+      "note": "红利·银行"
+    },
+    {
+      "code": "601077",
+      "name": "渝农商行",
+      "starred": true,
+      "note": "红利·农商行"
+    },
+    {
+      "code": "601899",
+      "name": "紫金矿业",
+      "starred": false,
+      "note": ""
+    },
+    {
+      "code": "603233",
+      "name": "大参林",
+      "starred": false,
+      "note": ""
+    },
+    {
+      "code": "002371",
+      "name": "北方华创",
+      "starred": false,
+      "note": ""
+    },
+    {
+      "code": "003816",
+      "name": "中国广核",
+      "starred": true,
+      "note": "红利·核电"
+    },
+    {
+      "code": "601985",
+      "name": "中国核电",
+      "starred": true,
+      "note": "红利·核电"
+    },
+    {
+      "code": "301018",
+      "name": "申菱环境",
+      "starred": false,
+      "note": ""
+    },
+    {
+      "code": "300990",
+      "name": "同飞股份",
+      "starred": false,
+      "note": ""
+    },
+    {
+      "code": "601872",
+      "name": "招商轮船",
+      "starred": false,
+      "note": ""
+    },
+    {
+      "code": "600737",
+      "name": "中粮糖业",
+      "starred": false,
+      "note": ""
+    },
+    {
+      "code": "603162",
+      "name": "海通发展",
+      "starred": false,
+      "note": ""
+    },
+    {
+      "code": "600378",
+      "name": "昊华科技",
+      "starred": false,
+      "note": ""
+    },
+    {
+      "code": "601118",
+      "name": "海南橡胶",
+      "starred": false,
+      "note": ""
+    },
+    {
+      "code": "601318",
+      "name": "中国平安",
+      "starred": true,
+      "note": "红利·保险"
+    },
+    {
+      "code": "601225",
+      "name": "陕西煤业",
+      "starred": true,
+      "note": "红利·煤炭"
+    },
+    {
+      "code": "600085",
+      "name": "同仁堂",
+      "starred": false,
+      "note": ""
+    },
+    {
+      "code": "000423",
+      "name": "东阿阿胶",
+      "starred": false,
+      "note": ""
+    }
+  ]
+}

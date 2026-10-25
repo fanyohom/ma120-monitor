@@ -138,14 +138,30 @@ class DashboardServiceTests(unittest.TestCase):
         self.assertIn("估值接口暂不可用", dashboard["valuation_update_warnings"][0])
 
     def test_full_history_draws_ma_across_entire_chart_window(self):
+        # 必须把「今天」固定成交易周几，否则周末必挂。
+        #
+        # 原因：这个用例靠 bdate_range(end=今天) 造 800 根 K，并期望
+        # replay 丢掉「今天那根还没走完的」。但周六/周日时
+        # bdate_range 的末位会退到上周五 —— 末端不再等于今天，
+        # 一根都不会被丢，于是 800 != 799。
+        # 也就是说本用例原本只在周一到周五成立（CI 每天跑，周末必红）。
+        fixed_now = datetime(2026, 10, 23, 15, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+
+        class FixedDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return fixed_now if tz is None else fixed_now.astimezone(tz)
+
         def extended_market(code, days, now, _cache_dir):
             self.assertEqual(days, 5000)
             dates = pd.bdate_range(end=now.date(), periods=800)
             rows = [[day.date().isoformat(), "10", "10"] for day in dates]
             return {"code": code, "qfq": rows, "raw": rows}
 
-        service = DashboardService(self.config_path, market_loader=extended_market)
-        replay = service.history("csi1000")
+        import web_app as web_app_module
+        with patch.object(web_app_module, "datetime", FixedDatetime):
+            service = DashboardService(self.config_path, market_loader=extended_market)
+            replay = service.history("csi1000")
         self.assertEqual(len(replay["series"]), 799)
         self.assertEqual(sum(point["ma"] is not None for point in replay["series"]), 299)
         self.assertEqual(replay["window_start"], replay["series"][0]["date"])
