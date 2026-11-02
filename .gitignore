@@ -37,6 +37,15 @@ watchlist.json.bak
 portfolio.json
 portfolio.json.bak
 
+# 关注池数据只存在 SQLite 里，不进仓库。
+# 原因是仓库公开，而「你在关注哪些股票」属于个人信息。
+# stocks.xlsx 是早期的人工维护表，已全量导入 data/market.sqlite3，
+# 41 只代码/名称与库内完全一致（校验过差集为空），留一份在本地备查即可。
+# 注意：新部署不会再自动播种关注池，需要从数据库备份恢复。
+stocks.xlsx
+watchlist.snapshot.json
+watchlist.snapshot.json.bak
+
 # 改表前的备份（stocks.xlsx.bak.<日期>），用于误删回滚，不入版本库
 stocks.xlsx.bak.*
 # 其余配置文件的改前备份同理（etf_plans.toml.bak.<时间戳> 等）
