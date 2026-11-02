@@ -47,7 +47,7 @@ ma120-monitor/
 ├── backtest_ma120_strategy.py   # MA120 策略回测工具
 ├── config_store.py              # SQLite 配置、事务与一次性迁移
 ├── doc/configuration-schema.sql # 配置表结构（初始化使用同一份 DDL）
-├── stocks.xlsx                  # 旧数据，仅用于一次性迁移
+├── stocks.xlsx                  # 本地文件，已不入库（数据已全量导入 SQLite）
 ├── pyproject.toml               # 项目元数据与依赖清单
 ├── uv.lock                      # 依赖锁定文件
 ├── conftest.py                  # pytest 路径配置
@@ -223,26 +223,31 @@ uv run python scripts/backup_market_data.py --output data/backups/my-market.sqli
 
 默认备份放在 `data/backups/`，包含行情和个人配置。恢复时先停止本地服务，再用备份替换数据库；不要在服务运行中仅复制主 `.sqlite3` 文件而忽略 WAL。ETF 成交账本 `dca_results/journal.sqlite3` 需另外保留。
 
-### 换机器还原关注池与「特殊关注」
+### 关注池数据不进 Git（含迁移说明）
 
-因为 `data/` 不进 Git，新机器 clone 后**功能都在、数据都不在**：
-关注池会从 `stocks.xlsx` 重新播种，但「特殊关注」星标和备注属于数据库里的数据，
-不会跟着代码走 —— 看起来就像这个功能不存在。
+**关注池、星标、备注都只存在 `data/market.sqlite3` 里，不随代码分发。**
+`stocks.xlsx` 与 `watchlist.snapshot.json` 都已加入 `.gitignore`，并从 Git 历史中移除
+—— 仓库是公开的，而「你关注哪些股票」属于个人信息。
 
-为此提供了关注池快照，把清单与星标一起放进仓库：
+所以新机器 clone 后**功能都在、数据全空**，需要从数据库备份恢复：
 
-```powershell
-# 导出（本机有数据时执行，改完关注池或星标后重新导一次）
-uv run python scripts/export_watchlist.py
-# 生成 / 更新 watchlist.snapshot.json，随代码一起提交
-
-# 导入（新机器 / 重装后）
-uv run python scripts/import_watchlist.py            # 只把星标与备注合并到已有标的
-uv run python scripts/import_watchlist.py --replace  # 连清单一起覆盖（会新增/删除条目）
+```
+uv run python scripts/backup_market_data.py --output data/backups/my-market.sqlite3
 ```
 
-默认是**合并**而不是覆盖：快照可能比本地库旧，直接覆盖会无声删掉你在本机新加的标的，
+如果只想搬关注池、不想搬整库，用快照脚本（快照文件自己保管，默认不提交）：
+
+```
+uv run python scripts/export_watchlist.py                    # 生成 watchlist.snapshot.json
+uv run python scripts/import_watchlist.py                    # 合并星标/备注，不增删标的
+uv run python scripts/import_watchlist.py --replace          # 连清单一起覆盖（会新增/删除）
+```
+
+导入默认是**合并**而不是覆盖：快照可能比本地库旧，直接覆盖会无声删掉你在本机新加的标的，
 所以危险动作必须显式加 `--replace`。
+
+⚠️ 早期版本曾用 `stocks.xlsx` 给空库「播种」关注池，该行为已随文件移出仓库失效，
+新部署不会自动出现任何标的。
 
 ## ETF 定投
 
@@ -268,7 +273,7 @@ uv run python web_app.py
 
 首次没有个人计划时，数据库会导入模板作为示例种子；在配置管理页保存个人计划后启用运行留档。模板和旧 `etf_plans.toml` 不再作为日常配置来源。没有导入过对应 PE 历史时，估值策略仍显示数据待补。
 
-股票 MA120 和 ETF 定投是两个独立入口。ETF 模块只生成计划、保存结果和登记你已经成交的交易，**不连接券商、不自动下单**。ETF 清单不放在 `stocks.xlsx`，避免与股票信号混在一起。
+股票 MA120 和 ETF 定投是两个独立入口。ETF 模块只生成计划、保存结果和登记你已经成交的交易，**不连接券商、不自动下单**。ETF 清单与股票关注池分别存储，避免与股票信号混在一起。
 
 投资方法背景见 [指数基金定投策略指南](doc/index-fund-investment-guide.md)：包含普通定投、涨跌幅定投、均线定投、估值定投、作者的退出思路，以及与当前实现的差异。
 
