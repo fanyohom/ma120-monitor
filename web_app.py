@@ -3,16 +3,20 @@
 import argparse
 import json
 import logging
+import re
 import sqlite3
 import sys
+import time
 from email.utils import formatdate
 import threading
 from contextlib import closing
 from datetime import date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, quote, urlsplit
 from zoneinfo import ZoneInfo
+
+import requests
 
 from etf_data import DataError, fetch_market, parse_history
 from etf_valuation_replay import ValuationReplay
@@ -30,6 +34,73 @@ import stock_dynamic_monitor as monitor
 WEB_DIR = BASE_DIR / "web"
 TIMEZONE = ZoneInfo("Asia/Shanghai")
 ETF_HISTORY_BARS = 5000
+
+# 名称检索：加关注池时按名称模糊查代码，省得手输代码。
+#
+# 数据源用腾讯 smartbox，返回形如
+#   v_hint="sz~000333~美的集团~mdjt~GP-A^sz~000527~美的电器~..."
+# 字段依次是 市场~代码~名称~拼音~类型。名称可能是 \uXXXX 转义。
+#
+# 为什么不用新浪 suggest3：该接口已废弃，直接返回 "File not found"。
+LOOKUP_URL = "https://smartbox.gtimg.cn/s3/?q={keyword}&t=all"
+LOOKUP_TTL_SECONDS = 600
+LOOKUP_MAX_ITEMS = 10
+_lookup_cache = {}
+_lookup_lock = threading.Lock()
+
+
+def _decode_unicode_escape(text):
+    """把 \\uXXXX 还原成字符；不能直接用 unicode_escape，会把中文按 latin-1 打乱。"""
+    return re.sub(r"\\u([0-9a-fA-F]{4})", lambda match: chr(int(match.group(1), 16)), text)
+
+
+def lookup_instruments(keyword):
+    """按名称/拼音/代码模糊检索 A 股，返回 [{code, name, market}]。"""
+    keyword = (keyword or "").strip()
+    if not keyword or len(keyword) > 20:
+        return []
+
+    now = time.monotonic()
+    with _lookup_lock:
+        cached = _lookup_cache.get(keyword)
+    if cached and now - cached[0] < LOOKUP_TTL_SECONDS:
+        return cached[1]
+
+    try:
+        response = requests.get(LOOKUP_URL.format(keyword=quote(keyword)),
+                                timeout=5, headers={"User-Agent": "Mozilla/5.0"})
+        response.encoding = "utf-8"
+        payload = response.text
+    except requests.RequestException:
+        # 检索失败不影响主流程：调用方退回到「手输代码」即可。
+        return []
+
+    match = re.search(r'v_hint="(.*?)"', payload, re.S)
+    if not match:
+        return []
+
+    items = []
+    seen = set()
+    for chunk in match.group(1).split("^"):
+        fields = chunk.split("~")
+        if len(fields) < 5:
+            continue
+        market, code, name, kind = fields[0], fields[1], fields[2], fields[4]
+        # 只要 A 股。GP-A 是沪深股票，港股(GP/hk)暂不支持。
+        if market != "sz" and market != "sh":
+            continue
+        if kind != "GP-A" or len(code) != 6 or not code.isdigit():
+            continue
+        if code in seen:
+            continue
+        seen.add(code)
+        items.append({"code": code, "name": _decode_unicode_escape(name), "market": market})
+        if len(items) >= LOOKUP_MAX_ITEMS:
+            break
+
+    with _lookup_lock:
+        _lookup_cache[keyword] = (now, items)
+    return items
 
 
 def allowed_request_host(host, port):
@@ -760,7 +831,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         parsed = urlsplit(self.path)
         path = parsed.path
         if path not in ("/api/dashboard", "/api/history", "/api/estimate", "/api/ma120", "/api/configuration",
-                        "/api/ma120/history", "/api/ma120/estimate", "/api/ma120/watchlist"):
+                        "/api/ma120/history", "/api/ma120/estimate", "/api/ma120/watchlist",
+                        "/api/ma120/lookup"):
             self._static(path)
             return
         try:
@@ -768,6 +840,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._json(200, self.configuration_service.current())
             elif path == "/api/ma120":
                 self._json(200, self.stock_service.current())
+            elif path == "/api/ma120/lookup":
+                keyword = parse_qs(parsed.query).get("q", [""])[0]
+                self._json(200, {"items": lookup_instruments(keyword)})
             elif path == "/api/ma120/watchlist":
                 self._json(200, self.stock_service.watchlist())
             elif path == "/api/ma120/history":

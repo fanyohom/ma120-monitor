@@ -205,20 +205,52 @@ function renderWatchlistItems(items) {
   }
 }
 
+// 写操作在服务端是「异步刷新」：POST 在后台重建快照之前就返回了，
+// 紧接着读 /api/ma120 拿到的仍是旧快照 —— 新加的标的不在里面，
+// 用户会以为「加了但搜不到」（2026-11-09 实际踩过）。
+// 这里轮询到快照真的发生变化为止，再渲染。
+function snapshotFingerprint(snapshot) {
+  const rows = snapshot?.watchlist || [];
+  return rows.map((row) => [row.code, row.name, Boolean(row.starred), row.note || '',
+    row.price ?? null, row.ma120 ?? null].join('|')).join(';');
+}
+
+async function waitForSnapshotChange(before, timeoutMs = 6000) {
+  const target = snapshotFingerprint(before);
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    try {
+      const updated = await request('/api/ma120');
+      if (updated.snapshot && snapshotFingerprint(updated.snapshot) !== target) return updated.snapshot;
+    } catch (error) {
+      // 刷新期间偶发读取失败，继续等
+    }
+  }
+  return null;
+}
+
 async function mutateWatchlist(method, path, body, successMessage) {
   if (watchlistBusy) return;
   setWatchlistBusy(true);
   watchlistFeedback('正在保存...');
+  const before = dashboard;
   try {
     const result = await watchlistRequest(method, path, body);
     renderWatchlistItems(result.items);
     setWatchlistBusy(true);
     $('watchlistAdd').reset();
-    watchlistFeedback(successMessage);
+    watchlistFeedback(`${successMessage}，正在更新行情…`);
     try {
-      const updated = await request('/api/ma120');
-      if (updated.snapshot) render(updated.snapshot);
-      else watchlistFeedback(`${successMessage}；监控概览稍后更新`);
+      const settled = await waitForSnapshotChange(before);
+      if (settled) {
+        render(settled);
+        watchlistFeedback(successMessage);
+      } else {
+        const updated = await request('/api/ma120');
+        if (updated.snapshot) render(updated.snapshot);
+        watchlistFeedback(`${successMessage}；行情仍在后台更新，稍后刷新页面查看`);
+      }
     } catch (error) {
       watchlistFeedback(`${successMessage}；监控概览更新失败：${error.message}`, true);
     }
@@ -829,12 +861,110 @@ $('markForm').addEventListener('submit', (event) => { event.preventDefault(); sa
 $('markStarred').addEventListener('change', (event) => {
   if (!event.target.checked) $('markNote').value = '';
 });
-$('watchlistAdd').addEventListener('submit', (event) => {
+// ---- 新增关注池：名称/拼音联想，免去手输代码 ----
+let suggestTimer = null;
+let suggestSeq = 0;
+
+function hideSuggest() {
+  const box = $('watchlistSuggest');
+  box.hidden = true;
+  box.innerHTML = '';
+}
+
+function renderSuggest(items) {
+  const box = $('watchlistSuggest');
+  box.innerHTML = '';
+  if (!items.length) {
+    const empty = document.createElement('div');
+    empty.className = 'sug-empty';
+    empty.textContent = '没找到匹配的股票，可以直接填代码';
+    box.appendChild(empty);
+    box.hidden = false;
+    return;
+  }
+  items.forEach((item) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    const label = document.createElement('span');
+    label.textContent = item.name;
+    const code = document.createElement('span');
+    code.className = 'sug-code';
+    code.textContent = item.code;
+    button.append(label, code);
+    button.addEventListener('click', () => {
+      $('watchlistName').value = item.name;
+      $('watchlistCode').value = item.code;
+      hideSuggest();
+      $('watchlistAdd').querySelector('button[type="submit"]').focus();
+    });
+    box.appendChild(button);
+  });
+  box.hidden = false;
+}
+
+async function lookupStock(query) {
+  const result = await request(`/api/ma120/lookup?q=${encodeURIComponent(query)}`);
+  return result.items || [];
+}
+
+$('watchlistName').addEventListener('input', () => {
+  const query = $('watchlistName').value.trim();
+  clearTimeout(suggestTimer);
+  if (!query) { hideSuggest(); return; }
+  suggestSeq += 1;
+  const seq = suggestSeq;
+  suggestTimer = setTimeout(async () => {
+    try {
+      const items = await lookupStock(query);
+      if (seq !== suggestSeq) return;   // 只认最后一次输入的结果
+      renderSuggest(items);
+    } catch (error) {
+      hideSuggest();
+    }
+  }, 250);
+});
+
+$('watchlistCode').addEventListener('input', () => {
+  if ($('watchlistCode').value.trim()) hideSuggest();
+});
+
+document.addEventListener('click', (event) => {
+  if (!event.target.closest('.watchlist-lookup')) hideSuggest();
+});
+
+$('watchlistAdd').addEventListener('submit', async (event) => {
   event.preventDefault();
-  const code = $('watchlistCode').value.trim().toUpperCase();
-  const name = $('watchlistName').value.trim();
-  if (!code || !name) return;
-  mutateWatchlist('POST', '/api/ma120/watchlist', {code, name}, `${name} 已加入关注池`);
+  const typedCode = $('watchlistCode').value.trim();
+  let name = $('watchlistName').value.trim();
+  if (!typedCode && !name) return;
+  hideSuggest();
+
+  let code = typedCode;
+  try {
+    if (code && !name) {
+      // 只填了代码：顺手把名称补上，省得再查
+      const items = await lookupStock(code);
+      const match = items.find((item) => item.code === code) || items[0];
+      if (match) name = match.name;
+    } else if (!code) {
+      // 只填了名称/拼音：解析成代码
+      const items = await lookupStock(name);
+      if (!items.length) {
+        watchlistFeedback(`没找到「${name}」，换个关键字或直接填代码试试`, true);
+        return;
+      }
+      const match = items.find((item) => item.name === name) || items[0];
+      code = match.code;
+      if (!name) name = match.name;
+      $('watchlistCode').value = match.code;
+    }
+  } catch (error) {
+    watchlistFeedback(`查询股票失败：${error.message}`, true);
+    return;
+  }
+
+  if (!code) { watchlistFeedback('请填写股票名称或代码', true); return; }
+  mutateWatchlist('POST', '/api/ma120/watchlist', {code, name: name || code}, `${name || code} 已加入关注池`);
 });
 $('stockBack').addEventListener('click', (event) => { event.preventDefault(); navigate(null); });
 window.addEventListener('popstate', () => { applyRoute(); window.scrollTo(0, 0); });

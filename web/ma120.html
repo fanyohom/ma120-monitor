@@ -92,8 +92,10 @@
     <div class="watchlist-dialog-inner">
       <div class="dialog-head"><div><h2 id="watchlistTitle">管理关注池</h2><p>修改保存在 SQLite；持仓和 ETF 计划可在配置管理页维护。</p></div><button id="watchlistClose" class="icon-btn" type="button" aria-label="关闭关注池管理">×</button></div>
       <form id="watchlistAdd" class="watchlist-add">
-        <label>股票代码<input id="watchlistCode" name="code" autocomplete="off" inputmode="text" placeholder="如 600519" required maxlength="8"></label>
-        <label>股票名称<input id="watchlistName" name="name" autocomplete="off" placeholder="如 贵州茅台" required maxlength="40"></label>
+        <label>股票代码<input id="watchlistCode" name="code" autocomplete="off" inputmode="text" placeholder="可留空" maxlength="8"></label>
+        <label class="watchlist-lookup">股票名称或拼音<input id="watchlistName" name="name" autocomplete="off" placeholder="如 美的 / mdjt" required maxlength="40">
+          <div id="watchlistSuggest" class="watchlist-suggest" role="listbox" aria-label="匹配的股票" hidden></div>
+        </label>
         <button class="primary-btn" type="submit">添加</button>
       </form>
       <p id="watchlistFeedback" class="watchlist-feedback" role="status" aria-live="polite" hidden></p>
