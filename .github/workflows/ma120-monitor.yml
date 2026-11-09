@@ -93,8 +93,14 @@ jobs:
           MONITOR_RESULT: ${{ needs.monitor.result }}
         run: |
           echo "::error::MA120 workflow failed: test=$TEST_RESULT monitor=$MONITOR_RESULT"
+          # push/PR 事件本来就不会跑 monitor，别让「monitor=skipped」被误读成监控挂了。
+          if [ "$MONITOR_RESULT" = "skipped" ]; then
+            TEXT="⚠️ MA120 代码测试失败（本次为 push/PR，本就不触发每日推送）：test=$TEST_RESULT。生产服务与每日 11:30 定时任务不受影响，但请修复测试后再合并。详情见 Actions 日志。"
+          else
+            TEXT="⚠️ MA120 每日监控失败：test=$TEST_RESULT，monitor=$MONITOR_RESULT。请检查 Actions 日志与服务器 timer。"
+          fi
           if [ -n "$FEISHU_WEBHOOK_URL" ]; then
             curl -sS -X POST -H 'Content-Type: application/json' \
-              -d "{\"msg_type\":\"text\",\"content\":{\"text\":\"⚠️ MA120 工作流失败：test=$TEST_RESULT，monitor=$MONITOR_RESULT，请检查 Actions 日志与服务器 timer。\"}}" \
+              -d "{\"msg_type\":\"text\",\"content\":{\"text\":\"$TEXT\"}}" \
               "$FEISHU_WEBHOOK_URL" || true
           fi

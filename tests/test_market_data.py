@@ -5,6 +5,7 @@ import time
 import unittest
 from datetime import datetime, timedelta
 from unittest.mock import Mock, patch
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -173,7 +174,10 @@ class MarketDataTests(unittest.TestCase):
                 with open(cache_path, "w", encoding="utf-8") as f:
                     json.dump(payload, f)
 
-                stale_mtime = (datetime.now() - timedelta(days=1)).replace(
+                # _is_cache_fresh() 按北京时间判断「文件是不是今天的」，
+                # 构造 mtime 时必须用同一个时区，否则 UTC 的 CI runner 会把
+                # 「北京时间昨天 23:59」误算成「UTC 今天」，测试/生产口径就分叉了。
+                stale_mtime = (datetime.now(ZoneInfo("Asia/Shanghai")) - timedelta(days=1)).replace(
                     hour=23,
                     minute=59,
                     second=0,
