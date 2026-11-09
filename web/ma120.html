@@ -21,11 +21,11 @@
     <div id="stockOverview">
     <div class="page-head"><div><div class="eyebrow">MARKET MONITOR</div><h1>MA120 监控</h1><p id="stockUpdated" class="muted">正在读取数据</p></div><div class="head-actions"><button id="watchlistManage" class="outline-btn" type="button">管理关注池</button></div></div>
 
-    <section class="metrics" aria-label="股票监控摘要">
-      <div class="metric"><span>持仓股票</span><strong id="portfolioCount">—</strong><small>数据库持仓配置</small></div>
-      <div class="metric"><span>关注股票</span><strong id="watchlistCount">—</strong><small>数据库关注池</small></div>
-      <div class="metric"><span>今日买入信号</span><strong id="buySignals">—</strong><small>首次跌破买入线</small></div>
-      <div class="metric"><span>今日卖出信号</span><strong id="sellSignals">—</strong><small>首次突破卖出线</small></div>
+    <section class="metrics" data-metrics aria-label="股票监控摘要">
+      <div class="metric" data-metric="portfolio" role="button" tabindex="0"><span>持仓股票</span><strong id="portfolioCount">—</strong><small>数据库持仓配置</small></div>
+      <div class="metric" data-metric="watchlist" role="button" tabindex="0"><span>关注股票</span><strong id="watchlistCount">—</strong><small>数据库关注池</small></div>
+      <div class="metric" data-metric="buy" role="button" tabindex="0"><span>今日买入信号</span><strong id="buySignals">—</strong><small>首次跌破买入线</small></div>
+      <div class="metric" data-metric="sell" role="button" tabindex="0"><span>今日卖出信号</span><strong id="sellSignals">—</strong><small>首次突破卖出线</small></div>
     </section>
 
     <div id="stockPositionSummary" class="stock-position-summary" hidden><div><span>持仓浮盈亏</span><strong id="totalPnl">—</strong><small id="pnlCoverage">—</small></div><div><span>估算市值</span><strong id="totalValue">—</strong></div><div><span>持仓成本</span><strong id="totalBasis">—</strong></div></div>

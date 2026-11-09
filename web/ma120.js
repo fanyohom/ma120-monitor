@@ -344,6 +344,7 @@ function renderSummary() {
   $('watchlistCount').textContent = summary.watchlist_count;
   $('buySignals').textContent = summary.buy_signals;
   $('sellSignals').textContent = summary.sell_signals;
+  updateMetricCards();
   const currencyTotals = summary.currency_totals || {};
   const currencies = Object.entries(currencyTotals).filter(([, totals]) => totals.pnl_coverage > 0);
   if (Object.keys(currencyTotals).length > 1) {
@@ -365,6 +366,72 @@ function renderSummary() {
   if (dashboard.source_error) notice(`股票清单读取异常：${dashboard.source_error}`, true);
   else notice([summary.data_unavailable ? `${summary.data_unavailable} 只股票的行情或均线数据待补；其余结果可查看。` : '',
     historical ? `${historical} 只显示数据库历史行情，数据日期见各行；刷新可更新，旧数据不生成今日信号。` : ''].filter(Boolean).join(' '));
+}
+
+// 顶部四个指标卡：复用已有的 tab / 状态筛选 / 详情路由，不新增后端接口。
+// signal 字段口径与 rowsForScope() 的 'buy' / 'sell' 筛选完全一致。
+function metricTargets(kind) {
+  if (!dashboard) return [];
+  const all = [...dashboard.portfolio, ...dashboard.watchlist];
+  if (kind === 'portfolio') return dashboard.portfolio;
+  if (kind === 'watchlist') return dashboard.watchlist;
+  if (kind === 'buy') return all.filter((row) => row.signal === 'buy');
+  if (kind === 'sell') return all.filter((row) => row.signal === 'sell');
+  return [];
+}
+
+function updateMetricCards() {
+  document.querySelectorAll('[data-metrics] [data-metric]').forEach((card) => {
+    const kind = card.dataset.metric;
+    const count = metricTargets(kind).length;
+    const label = card.querySelector('span')?.textContent || '';
+    let hint;
+    if (!count) hint = (kind === 'buy' || kind === 'sell') ? '今日暂无信号' : '当前没有股票';
+    else if (kind === 'buy' || kind === 'sell') hint = count === 1 ? '点击直达该股详情' : `点击筛选这 ${count} 只`;
+    else hint = `点击只看${label}`;
+    card.setAttribute('aria-disabled', String(count === 0));
+    card.setAttribute('aria-label', `${label} ${count} 只，${hint}`);
+    card.title = hint;
+  });
+}
+
+function setScope(next, shouldRender = true) {
+  scope = next;
+  currentPage = 1;
+  document.querySelectorAll('[data-scope]').forEach((tab) => {
+    const selected = tab.dataset.scope === next;
+    tab.classList.toggle('active', selected);
+    tab.setAttribute('aria-selected', String(selected));
+  });
+  if (shouldRender && dashboard) renderRows();
+}
+
+function applyMetric(kind) {
+  if (!dashboard) return;
+  const targets = metricTargets(kind);
+  const label = document.querySelector(`[data-metric="${kind}"] span`)?.textContent || '';
+  if (!targets.length) {
+    refreshFeedback((kind === 'buy' || kind === 'sell')
+      ? `今日没有${label.replace('今日', '')}的股票`
+      : `${label}当前为 0 只`);
+    return;
+  }
+  // 清掉旧搜索词，避免点指标后列表被上次的关键词挡住而看起来「没反应」。
+  $('stockSearch').value = '';
+  $('stockFilter').value = (kind === 'buy' || kind === 'sell') ? kind : 'all';
+  setScope((kind === 'portfolio' || kind === 'watchlist') ? kind : 'all', false);
+  currentPage = 1;
+  renderRows();
+  // 只命中一支时直接进详情，省掉「先筛出一行、再点一次」。
+  if ((kind === 'buy' || kind === 'sell') && targets.length === 1) {
+    navigate(targets[0].code);
+    return;
+  }
+  const table = document.querySelector('.table-scroll');
+  if (table) table.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  refreshFeedback((kind === 'buy' || kind === 'sell')
+    ? `已筛选出 ${targets.length} 只${label}的股票，点任意一行查看详情`
+    : `已切到${label}（${targets.length} 只），点任意一行查看详情`);
 }
 
 function renderRows() {
@@ -833,16 +900,21 @@ async function refresh() {
   }
 }
 
-document.querySelectorAll('[data-scope]').forEach((button) => button.addEventListener('click', () => {
-  scope = button.dataset.scope;
-  currentPage = 1;
-  document.querySelectorAll('[data-scope]').forEach((tab) => {
-    const selected = tab === button;
-    tab.classList.toggle('active', selected);
-    tab.setAttribute('aria-selected', String(selected));
-  });
-  if (dashboard) renderRows();
-}));
+document.querySelectorAll('[data-scope]').forEach((button) => button.addEventListener('click', () => setScope(button.dataset.scope)));
+
+// 指标卡用事件委托，卡片本体保持 div 以免破坏 .metric 的 nth-child 布局与移动端断点。
+const metricBar = document.querySelector('[data-metrics]');
+metricBar?.addEventListener('click', (event) => {
+  const card = event.target.closest('[data-metric]');
+  if (card) applyMetric(card.dataset.metric);
+});
+metricBar?.addEventListener('keydown', (event) => {
+  if (event.key !== 'Enter' && event.key !== ' ') return;
+  const card = event.target.closest('[data-metric]');
+  if (!card) return;
+  event.preventDefault();
+  applyMetric(card.dataset.metric);
+});
 $('stockSearch').addEventListener('input', () => { currentPage = 1; if (dashboard) renderRows(); });
 $('stockFilter').addEventListener('change', () => { currentPage = 1; if (dashboard) renderRows(); });
 $('stockSort').addEventListener('change', () => { currentPage = 1; if (dashboard) renderRows(); });
