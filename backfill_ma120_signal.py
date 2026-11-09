@@ -40,11 +40,14 @@ import sys
 from dataclasses import dataclass
 from datetime import date as _date
 
+import ma120_strategy
 import stock_dynamic_monitor as monitor
 
-WINDOW = 120
-BUY_RATIO = 0.88
-SELL_RATIO = 1.12
+# 默认值只在「单独 import 本模块」时生效；运行时由 load_watchlist()
+# 从数据库 ma120_settings 覆盖，避免回算与线上用两套参数。
+WINDOW = ma120_strategy.DEFAULTS.ma_days
+BUY_RATIO = ma120_strategy.DEFAULTS.buy_factor
+SELL_RATIO = ma120_strategy.DEFAULTS.sell_factor
 
 ABOVE_SELL = ">卖出线"
 BELOW_BUY = "<买入线"
@@ -83,7 +86,9 @@ class Result:
 def load_watchlist() -> list[tuple[str, str]]:
     global WINDOW, BUY_RATIO, SELL_RATIO
     items = monitor.load_watchlist()
-    WINDOW, BUY_RATIO, SELL_RATIO = monitor.MA_LONG, monitor.BUY_THRESHOLD, monitor.SELL_THRESHOLD
+    settings = ma120_strategy.load_settings()
+    WINDOW, BUY_RATIO, SELL_RATIO = (
+        settings.ma_days, settings.buy_factor, settings.sell_factor)
     return [(item["code"], item["name"]) for item in items]
 
 
@@ -136,11 +141,11 @@ def analyse(bars: list[Bar], code: str, name: str, target: str) -> Result | None
     price = today.close
     prev_close = bar2.close
 
-    signal = None
-    if price < ma120 * BUY_RATIO and prev_close >= prev_buy:
-        signal = "买入信号"
-    elif price > ma120 * SELL_RATIO and prev_close <= prev_sell:
-        signal = "卖出信号"
+    # 首穿判定统一走 ma120_strategy；prev 仍锚 bar2(T-2)，
+    # 刻意复刻 11:30 主监控的历史行为，不要「顺手修正」。
+    settings = ma120_strategy.Settings(WINDOW, BUY_RATIO, SELL_RATIO, WINDOW)
+    side = ma120_strategy.first_cross(price, ma120, prev_close, ma120_prev, settings)
+    signal = {"buy": "买入信号", "sell": "卖出信号"}.get(side)
 
     intraday = None
     if signal is None:

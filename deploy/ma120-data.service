@@ -1,0 +1,22 @@
+# 数据盘 bind mount（oneshot）。安装：sudo cp deploy/ma120-data.service /etc/systemd/system/
+#
+# 为什么不用 fstab 写 bind：把 bind 写进 fstab 会让 systemd 给「源目录」和
+# 「目标」各生成一个 mount 单元，出现叠加挂载（umount 一次只掉一层），
+# 极难排查。用独立 oneshot 单元最干净。
+# /root 是 700，应用用户 ma120 进不去 /root/data/disk，所以必须 bind 到 /srv。
+[Unit]
+Description=Bind-mount MA120 data directory from the data disk
+Documentation=man:mount(8)
+After=root-data-disk.mount
+Requisite=root-data-disk.mount
+Before=ma120-web.service ma120-monitor.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=/bin/mkdir -p /srv/ma120-data
+ExecStart=/bin/mount --bind /root/data/disk/ma120 /srv/ma120-data
+ExecStop=/bin/umount /srv/ma120-data
+
+[Install]
+WantedBy=multi-user.target

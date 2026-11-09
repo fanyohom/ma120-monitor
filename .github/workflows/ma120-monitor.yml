@@ -76,4 +76,25 @@ jobs:
           PYTHONUTF8: '1'
         # --skip-non-trading-day：非A 股交易日（周末与法定节假日）
         # 探测不到当日实时行情即直接跳过，避免空推卡片。
+        # 脚本在飞书推送失败时会以非零码退出，job 随即变红。
         run: uv run python stock_dynamic_monitor.py --skip-non-trading-day
+
+  notify:
+    name: 失败告警
+    runs-on: ubuntu-latest
+    needs: [test, monitor]
+    # 任一 job 失败都要有对外信号，否则「测试红了 → 当天没推卡片」同样无人察觉。
+    if: failure()
+    steps:
+      - name: Send Feishu alert
+        env:
+          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
+          TEST_RESULT: ${{ needs.test.result }}
+          MONITOR_RESULT: ${{ needs.monitor.result }}
+        run: |
+          echo "::error::MA120 workflow failed: test=$TEST_RESULT monitor=$MONITOR_RESULT"
+          if [ -n "$FEISHU_WEBHOOK_URL" ]; then
+            curl -sS -X POST -H 'Content-Type: application/json' \
+              -d "{\"msg_type\":\"text\",\"content\":{\"text\":\"⚠️ MA120 工作流失败：test=$TEST_RESULT，monitor=$MONITOR_RESULT，请检查 Actions 日志与服务器 timer。\"}}" \
+              "$FEISHU_WEBHOOK_URL" || true
+          fi

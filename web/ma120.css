@@ -26,7 +26,7 @@
 .watchlist-suggest[hidden]{display:none}
 .watchlist-suggest button{display:flex;width:100%;align-items:baseline;justify-content:space-between;gap:10px;padding:8px 10px;border:0;border-bottom:1px solid #eef3f1;background:#fff;color:#253e42;font-size:12px;text-align:left;cursor:pointer}
 .watchlist-suggest button:last-child{border-bottom:0}
-.watchlist-suggest button:hover,.watchlist-suggest button:focus{background:#eff7f3}
+.watchlist-suggest button:hover,.watchlist-suggest button:focus,.watchlist-suggest button.active,.watchlist-suggest button[aria-selected="true"]{background:#eff7f3}
 .watchlist-suggest .sug-code{flex:none;color:#869598;font-size:11px;font-variant-numeric:tabular-nums}
 .watchlist-suggest .sug-empty{padding:9px 10px;color:#829193;font-size:12px}
 .stock-mark-dialog{max-width:420px}

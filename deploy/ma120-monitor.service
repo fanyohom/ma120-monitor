@@ -1,0 +1,28 @@
+# 每日刷新 + 飞书推送（oneshot，由 ma120-monitor.timer 触发）
+# 安装：sudo cp deploy/ma120-monitor.service /etc/systemd/system/
+#       sudo systemctl daemon-reload
+# 自检（不会推卡片）：
+#   sudo systemd-run --pipe --wait --collect --quiet --uid=ma120 --gid=ma120 \
+#     --working-directory=/opt/ma120-monitor --setenv=PYTHONUTF8=1 --setenv=TZ=Asia/Shanghai \
+#     /opt/ma120-monitor/.venv/bin/python stock_dynamic_monitor.py --no-feishu
+[Unit]
+Description=MA120 daily monitor (refresh + Feishu push)
+After=network-online.target
+Wants=network-online.target
+Requires=ma120-data.service
+After=ma120-data.service
+
+[Service]
+ExecStartPre=/bin/mountpoint -q /srv/ma120-data
+ExecStartPre=/bin/test -s /srv/ma120-data/market.sqlite3
+Type=oneshot
+User=ma120
+Group=ma120
+WorkingDirectory=/opt/ma120-monitor
+Environment=PYTHONUTF8=1
+Environment=TZ=Asia/Shanghai
+ExecStart=/opt/ma120-monitor/.venv/bin/python stock_dynamic_monitor.py --skip-non-trading-day
+TimeoutStartSec=900
+
+# 飞书推送失败时脚本以非零码退出，systemd 会标记为 failed。
+# 配合 HEALTHCHECK_URL（见 deploy/env.local.example）实现「没收到心跳就告警」。

@@ -37,17 +37,47 @@ class ConfigurationStore:
     # 单次事务原子，无法保证 operation 基于最新快照计算。
     _write_lock = threading.RLock()
 
+    # 配置表的 DDL（executescript + ALTER 补列）是写操作。原来每次 connect()
+    # 都执行一遍，而读路径的 connect() 又不持 _write_lock，与写事务的
+    # BEGIN IMMEDIATE 抢同一把 SQLite 写锁 —— 这正是 2026-10-22 已修的
+    # MarketStore 竞态在配置层的残留。
+    # 按数据库路径记录「本进程已建表」，换临时库仍能各自初始化。
+    _schema_lock = threading.Lock()
+    _schema_ready = set()
+
     def __init__(self, database=DEFAULT_DATABASE, root=None):
         self.database = Path(database)
         self.root = Path(root) if root is not None else self.database.resolve().parent.parent
         self.market = MarketStore(self.database)
         self._write_lock = self.__class__._write_lock
 
+    def _schema_key(self):
+        try:
+            return str(self.database.resolve())
+        except OSError:
+            return str(self.database)
+
+    def _ensure_config_schema(self):
+        """一次性建表 + 幂等补列；只在持 _write_lock 的 initialize() 内调用。"""
+        key = self._schema_key()
+        cls = self.__class__
+        if key in cls._schema_ready:
+            return
+        with cls._schema_lock:
+            if key in cls._schema_ready:
+                return
+            with closing(self.market.connect()) as db:
+                db.executescript(SCHEMA.read_text(encoding="utf-8"))
+                self._migrate(db)
+            cls._schema_ready.add(key)
+
     def connect(self):
-        db = self.market.connect()
-        db.executescript(SCHEMA.read_text(encoding="utf-8"))
-        self._migrate(db)
-        return db
+        """纯连接，不再执行任何 DDL。
+
+        所有公开读写入口都会先调用 initialize()（它持锁并完成一次性建表），
+        因此这里反复建表既无必要、又会在并发时把连接降级为 readonly。
+        """
+        return self.market.connect()
 
     @staticmethod
     def _migrate(db):
@@ -140,9 +170,10 @@ class ConfigurationStore:
 
     def initialize(self):
         """Seed each section once. A deliberately emptied database stays empty."""
-        # connect() 本身就会 executescript 执行建表 DDL，属于写操作，
-        # 必须整段持锁；否则这里仍会与并发写抢 SQLite 写锁。
+        # 建表 DDL 与播种都是写操作，必须整段持锁；建表本身收敛为
+        # 每个进程、每个数据库文件只做一次，读路径的 connect() 不再碰 DDL。
         with self._write_lock:
+            self._ensure_config_schema()
             with closing(self.connect()) as db:
                 if not self._needs_seed(db):
                     return

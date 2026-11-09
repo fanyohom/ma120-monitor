@@ -1,0 +1,7 @@
+# 追加到 /etc/fstab 的数据盘片段（用 blkid 查真实 UUID 后替换）。
+#  mount 点必须是绝对路径；曾因相对路径导致 systemd 生成重复挂载单元。
+# 注意：这里绝不能写 /srv/ma120-data 的 bind 行，理由见 ma120-data.service。
+# /dev/vdb 上还有 4G swapfile 在用，改动挂载点会牵连 swap，需先 swapoff，
+# 内存不足时不要动。
+UUID=<DATA_DISK_UUID> /root/data/disk ext4 defaults 0 0
+/root/data/disk/swapfile none swap sw 0 0

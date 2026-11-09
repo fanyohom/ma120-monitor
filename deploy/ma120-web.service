@@ -1,0 +1,29 @@
+# 安装：sudo cp deploy/ma120-web.service /etc/systemd/system/
+#       sudo systemctl daemon-reload && sudo systemctl enable --now ma120-web.service
+[Unit]
+Description=MA120 Web Console
+Documentation=https://github.com/fanyohom/ma120-monitor
+After=network-online.target
+Wants=network-online.target
+Requires=ma120-data.service
+After=ma120-data.service
+
+[Service]
+# 宁可起不来，也不要在挂载失效时静默建一个空库。
+ExecStartPre=/bin/mountpoint -q /srv/ma120-data
+ExecStartPre=/bin/test -s /srv/ma120-data/market.sqlite3
+Type=simple
+User=ma120
+Group=ma120
+WorkingDirectory=/opt/ma120-monitor
+Environment=PYTHONUTF8=1
+Environment=TZ=Asia/Shanghai
+ExecStart=/opt/ma120-monitor/.venv/bin/python web_app.py --host 127.0.0.1 --port 8765 --log-file /opt/ma120-monitor/web_app.log
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

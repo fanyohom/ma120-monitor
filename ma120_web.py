@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
+import ma120_strategy
 import stock_dynamic_monitor as monitor
 import pandas as pd
 
@@ -67,10 +68,13 @@ def build_ma120_history(code, name, hist_loader=None, now=None):
         side = None
         if index >= monitor.MA_LONG:
             prev_close = float(closes.iloc[index - 1])
-            if close < buy and prev_close >= float(buy_line.iloc[index - 1]):
-                side = "buy"
-            elif close > sell and prev_close <= float(sell_line.iloc[index - 1]):
-                side = "sell"
+            # 首穿判定统一走 ma120_strategy；prev 是相邻前一根，用该根自身均线。
+            # monitor.* 此刻已是数据库配置值（dashboard 加载时覆盖过），不必重复读库。
+            settings = ma120_strategy.Settings(
+                monitor.MA_LONG, monitor.BUY_THRESHOLD, monitor.SELL_THRESHOLD, monitor.MA_LONG)
+            hit = ma120_strategy.first_cross(
+                close, average, prev_close, float(ma.iloc[index - 1]), settings)
+            side = hit if hit != "hold" else None
         series.append({"date": day, "close": close, "ma120": average,
                        "buy_line": buy, "sell_line": sell, "signal": side})
         if side:
@@ -222,16 +226,17 @@ def _row(item, *, portfolio, hist_loader, quote_loader, today):
             row["error"] = "MA120 无法计算"
             return row
 
+        settings = ma120_strategy.Settings(
+            monitor.MA_LONG, monitor.BUY_THRESHOLD, monitor.SELL_THRESHOLD, monitor.MA_LONG)
         today_signal = None
         if not history_stale and last_day == today and signal["signal"] in ("buy", "sell"):
             today_signal = signal["signal"]
         elif not history_stale and use_quote and last_day < today:
-            buy_threshold = signal["ma120"] * monitor.BUY_THRESHOLD
-            sell_threshold = signal["ma120"] * monitor.SELL_THRESHOLD
-            if signal["price"] < buy_threshold <= last_close:
-                today_signal = "buy"
-            elif signal["price"] > sell_threshold >= last_close:
-                today_signal = "sell"
+            # 盘中日 K 最后一根是 T-1，用昨收做 prev 锚、prev 均线沿用当前 MA，
+            # 与 first_cross 的既有语义一致（刻意不改动历史行为）。
+            hit = ma120_strategy.first_cross(
+                signal["price"], signal["ma120"], last_close, signal["ma120"], settings)
+            today_signal = hit if hit != "hold" else None
 
         row.update({
             "price": float(signal["price"]),
@@ -244,12 +249,10 @@ def _row(item, *, portfolio, hist_loader, quote_loader, today):
             "sell_line": float(signal["sell_line"]),
             "signal": today_signal,
         })
-        if row["price"] < row["buy_line"]:
-            row["zone"] = "below_buy"
-        elif row["price"] > row["sell_line"]:
-            row["zone"] = "above_sell"
-        else:
-            row["zone"] = "between"
+        # zone 用 round(2) 的展示线（与 buy_line/sell_line 字段一致）；
+        # 信号判定用未 round 的判定阈值，两者口径由 ma120_strategy 统一提供。
+        row["zone"] = ma120_strategy.zone_of(
+            row["price"], row["ma120"], settings, rounded=True)
         row["status"] = monitor._card_status({**signal, "signal": row["signal"] or "hold"})
         row["data_stale"] = bool(history_stale or quote.get("data_stale"))
         if row["data_stale"]:

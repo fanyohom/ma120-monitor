@@ -6,31 +6,25 @@ os.environ.setdefault("PYTHONUTF8", "1")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import pandas as pd
+import ma120_strategy  # noqa: E402
 from stock_dynamic_monitor import (  # noqa: E402
-    MA_LONG, BUY_THRESHOLD, SELL_THRESHOLD,
     get_stock_hist_data, get_stock_realtime_quote, check_ma120_signal,
 )
+
+# 策略参数从数据库读，不在导入时绑定 monitor 的模块级默认常量：
+# 那会让「页面/飞书用 MA60、复盘脚本仍按 MA120」这种不一致悄悄发生。
+settings = ma120_strategy.load_settings()
+MA_LONG, BUY_THRESHOLD, SELL_THRESHOLD = (
+    settings.ma_days, settings.buy_factor, settings.sell_factor)
 
 code = sys.argv[1] if len(sys.argv) > 1 else "002714"
 name = sys.argv[2] if len(sys.argv) > 2 else ""
 # 第三个参数：历史复盘要拉的日 K 根数（默认取项目口径 200 根）
 days = int(sys.argv[3]) if len(sys.argv) > 3 else None
 
-if days:
-    # 走新浪日 K 直取长历史，绕过 DATA_DAYS=200 的缓存窗口
-    import requests
-    from stock_dynamic_monitor import _sina_symbol
-    resp = requests.get(
-        "https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/"
-        "CN_MarketData.getKLineData",
-        params={"symbol": _sina_symbol(code), "scale": 240, "ma": "no", "datalen": days},
-        timeout=20,
-    )
-    df = pd.DataFrame(resp.json()).rename(columns={"day": "date", "vol": "volume"})
-    for col in ["open", "high", "low", "close", "volume"]:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-else:
-    df = get_stock_hist_data(code)
+# 数据源已统一为腾讯 fqkline(qfq)。深历史也走同一个函数，
+# 不再直连新浪不复权接口 —— 否则复盘出来的穿越点与线上信号对不上。
+df = get_stock_hist_data(code, days=days, force=bool(days))
 
 if df is None or len(df) < MA_LONG:
     print("日K不足")
@@ -88,11 +82,11 @@ for i in range(1, len(sub)):
     r, p = sub.iloc[i], sub.iloc[i - 1]
     c, b, s = float(r["close"]), float(r["buy"]), float(r["sell"])
     pc, pb, ps = float(p["close"]), float(p["buy"]), float(p["sell"])
-    kind = None
-    if c < b and pc >= pb:
-        kind = "买入信号(跌破买入线)"
-    elif c > s and pc <= ps:
-        kind = "卖出信号(涨破卖出线)"
+    # 首穿判定统一走 ma120_strategy；prev 仍是相邻前一根、用该根自身均线。
+    side = ma120_strategy.first_cross(
+        c, float(r["ma120"]), pc, float(p["ma120"]), settings)
+    kind = {"buy": "买入信号(跌破买入线)",
+            "sell": "卖出信号(涨破卖出线)"}.get(side)
     if kind:
         nm = (c - float(r["ma120"])) / float(r["ma120"]) * 100
         fwd = []
@@ -113,7 +107,9 @@ for label, want in (("买入信号", "买入信号"), ("卖出信号", "卖出�
         r, p = sub.iloc[i], sub.iloc[i - 1]
         c, b_, s_ = float(r["close"]), float(r["buy"]), float(r["sell"])
         pc, pb, ps = float(p["close"]), float(p["buy"]), float(p["sell"])
-        fired = (c < b_ and pc >= pb) if want == "买入信号" else (c > s_ and pc <= ps)
+        side = ma120_strategy.first_cross(
+            c, float(r["ma120"]), pc, float(p["ma120"]), settings)
+        fired = side == ("buy" if want == "买入信号" else "sell")
         if not fired:
             continue
         row = {"date": str(r["date"])[:10], "c": c}

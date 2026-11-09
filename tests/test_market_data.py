@@ -62,15 +62,18 @@ class MarketDataTests(unittest.TestCase):
     def test_long_history_request_does_not_reuse_200_bar_cache(self, read_cache, _write_cache, get):
         read_cache.return_value = pd.DataFrame({"close": [100] * 200})
         response = Mock()
-        response.json.return_value = [
-            {"day": day.date().isoformat(), "open": "100", "high": "100",
-             "low": "100", "close": "100", "vol": "1000"}
-            for day in pd.bdate_range(end="2026-10-02", periods=800)
-        ]
+        # 2026-11-09 起 A 股日 K 统一走腾讯 fqkline(qfq)。
+        response.json.return_value = {
+            "data": {"sh600001": {"qfqday": [
+                [day.date().isoformat(), "100", "100", "100", "100", "1000"]
+                for day in pd.bdate_range(end="2026-10-02", periods=800)
+            ]}}
+        }
         get.return_value = response
         bars = monitor.get_stock_hist_data("600001", days=800)
         self.assertEqual(len(bars), 800)
-        self.assertEqual(get.call_args.kwargs["params"]["datalen"], 800)
+        self.assertEqual(get.call_args.kwargs["params"]["param"],
+                         "sh600001,day,,,800,qfq")
 
     @patch("stock_dynamic_monitor.requests.get")
     @patch("stock_dynamic_monitor._read_cache")

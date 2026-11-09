@@ -1,5 +1,5 @@
 """
-MA120 持仓 & 关注池监控（Sina 数据源）
+MA120 持仓 & 关注池监控（腾讯 fqkline 前复权日 K）
 
 数据：
   - SQLite portfolio_positions：持仓、成本价、持仓数量
@@ -30,6 +30,8 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import ma120_strategy
+
 import pandas as pd
 import requests
 from portfolio_store import PortfolioError, read_portfolio
@@ -59,6 +61,13 @@ WATCHLIST_SHEET = "watchlist"
 FEISHU_WEBHOOK_URL_ENV = "FEISHU_WEBHOOK_URL"
 FEISHU_WEBHOOK_URL_TEMPLATE = "{{FEISHU_WEBHOOK_URL}}"
 LOCAL_ENV_FILE = os.path.join(BASE_DIR, ".env.local")
+
+# 推送可靠性：5xx / 网络异常重试，4xx 与飞书业务错误不重试。
+FEISHU_MAX_ATTEMPTS = 3
+FEISHU_RETRY_BASE_SECONDS = 1.0
+# 可选的「死人开关」URL（如 healthchecks.io）。只在全部卡片推送成功后 ping 一次；
+# 外部监控发现「超过 N 小时没收到 ping」即告警，可覆盖「连续多日静默跳过」这类故障。
+HEALTHCHECK_URL_ENV = "HEALTHCHECK_URL"
 
 
 # ---------- 数据文件加载 ----------
@@ -166,8 +175,8 @@ def _cache_path(code: str) -> str:
 
 
 def _is_cache_fresh(path: str) -> bool:
-    modified_at = datetime.fromtimestamp(os.path.getmtime(path))
-    if modified_at.date() != datetime.now().date():
+    modified_at = datetime.fromtimestamp(os.path.getmtime(path), ZoneInfo("Asia/Shanghai"))
+    if modified_at.date() != datetime.now(ZoneInfo("Asia/Shanghai")).date():
         return False
     return time.time() - os.path.getmtime(path) <= CACHE_DAYS * 86400
 
@@ -191,7 +200,8 @@ def _read_cache(code: str, allow_stale: bool = False) -> pd.DataFrame | None:
     store = _market_store()
     payload = store.get_history("stock", code)
     if payload is not None:
-        fresh = datetime.fromisoformat(payload["fetched_at"]).date() == datetime.now().date()
+        fresh = (datetime.fromisoformat(payload["fetched_at"]).date()
+                 == datetime.now(ZoneInfo("Asia/Shanghai")).date())
         if fresh or allow_stale:
             frame = _history_frame(payload)
             frame.attrs["data_stale"] = not fresh
@@ -223,8 +233,7 @@ def _write_cache(code: str, df: pd.DataFrame, fetched_at=None) -> None:
     rows = [[stamp.isoformat(), float(row["open"]), float(row["close"]),
              float(row["high"]), float(row["low"]), float(row["volume"])]
             for stamp, row in df.iterrows()]
-    source = "Tencent qfq" if _is_hk_code(code) else "Sina daily"
-    _market_store().put_history("stock", code, {"bars": rows}, {"source": source}, fetched_at)
+    _market_store().put_history("stock", code, {"bars": rows}, {"source": "Tencent qfq"}, fetched_at)
 
 
 def _last_bar_date(df: pd.DataFrame):
@@ -315,9 +324,42 @@ def _store_history(stock_code: str, df: pd.DataFrame) -> None:
             type(exc).__name__, exc)
 
 
+def _kline_symbol(stock_code: str) -> str:
+    """腾讯 fqkline 的标的代码：A 股 sh/sz 前缀、港股 hk 前缀。"""
+    if _is_hk_code(stock_code):
+        return _tencent_symbol(stock_code)
+    return _sina_symbol(stock_code)
+
+
+def _drop_unfinished_session_bar(df: pd.DataFrame) -> pd.DataFrame:
+    """收盘前丢弃当日那根尚未定稿的 K 线，保持 MA120 只基于已完成交易日。
+
+    腾讯 fqkline 在盘中就会返回当日 bar（收盘价随实时价变动），
+    而原来的新浪日 K 只给到上一交易日。若直接采用，MA120 会从
+    「基于上一交易日收盘」变成「含当日盘中价」，11:30 的信号口径被悄悄改变。
+    15:05 之后认为当日 K 线已定稿，予以保留。
+    """
+    if df is None or df.empty or not isinstance(df.index, pd.DatetimeIndex):
+        return df
+    now = datetime.now(ZoneInfo("Asia/Shanghai"))
+    if df.index.max().date() != now.date():
+        return df
+    if (now.hour, now.minute) >= (15, 5):
+        return df
+    return df.iloc[:-1]
+
+
 def get_stock_hist_data(stock_code: str, days: int | None = None, force: bool = False,
-                        database_only: bool = False) -> pd.DataFrame:
-    """获取前复权日 K：A 股使用新浪，港股使用腾讯。"""
+                        database_only: bool = False, replace_bars: bool = False) -> pd.DataFrame:
+    """获取前复权日 K：A 股与港股统一走腾讯 fqkline(qfq)。
+
+    A 股原先用新浪 getKLineData（不复权），除权分红后历史价不回溯调整，
+    会系统性抬高/压低 MA120；实测美的集团近 250 根有 161 根与腾讯 qfq 不一致，
+    MA120 偏高约 1.17%。2026-11-09 统一为前复权口径。
+
+    replace_bars=True 只用于「口径切换后的存量重刷」：不与旧的不复权 bar
+    合并，避免两套价格口径混进同一份历史序列。
+    """
     days = DATA_DAYS if days is None else days
     cached = _read_cache(stock_code, allow_stale=True) if database_only else _read_cache(stock_code)
     # 注意：database_only 只表示「不联网」，**不代表数据陈旧**。
@@ -344,48 +386,35 @@ def get_stock_hist_data(stock_code: str, days: int | None = None, force: bool = 
         fallback.attrs["data_stale"] = True
 
     try:
-        if _is_hk_code(stock_code):
-            symbol = _tencent_symbol(stock_code)
-            url = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
-            params = {"param": f"{symbol},day,,,{days},qfq"}
-            response = requests.get(url, params=params, timeout=15)
-            response.raise_for_status()
-            payload = response.json()
-            market_data = payload.get("data", {}).get(symbol, {})
-            data = market_data.get("qfqday") or market_data.get("day") or []
-            if not data:
-                return fallback
-
-            df = pd.DataFrame(
-                [row[:6] for row in data],
-                columns=["date", "open", "close", "high", "low", "volume"],
-            )
-            df["date"] = pd.to_datetime(df["date"])
-            df = df.set_index("date").sort_index()
-            for col in ["open", "high", "low", "close", "volume"]:
-                df[col] = pd.to_numeric(df[col], errors="coerce")
-            if not _newer_than(df, fallback):
-                return fallback
-            df = _merge_bars(fallback, df)
-            _store_history(stock_code, df)
-            return df
-
-        symbol = _sina_symbol(stock_code)
-        url = "https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData"
-        params = {"symbol": symbol, "scale": 240, "ma": "no", "datalen": days}
+        symbol = _kline_symbol(stock_code)
+        url = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
+        params = {"param": f"{symbol},day,,,{days},qfq"}
         response = requests.get(url, params=params, timeout=15)
-        data = response.json()
+        response.raise_for_status()
+        payload = response.json()
+        market_data = payload.get("data", {}).get(symbol, {})
+        data = market_data.get("qfqday") or market_data.get("day") or []
         if not data:
             return fallback
-        df = pd.DataFrame(data)
-        df = df.rename(columns={"day": "date", "vol": "volume"})
+
+        df = pd.DataFrame(
+            [row[:6] for row in data],
+            columns=["date", "open", "close", "high", "low", "volume"],
+        )
         df["date"] = pd.to_datetime(df["date"])
         df = df.set_index("date").sort_index()
         for col in ["open", "high", "low", "close", "volume"]:
             df[col] = pd.to_numeric(df[col], errors="coerce")
-        if not _newer_than(df, fallback):
+        df = _drop_unfinished_session_bar(df)
+        if df.empty:
             return fallback
-        df = _merge_bars(fallback, df)
+        # 重刷会替换整份历史，残缺响应绝不能覆盖库里的完整序列。
+        if replace_bars and len(df) < MA_LONG:
+            return fallback
+        if not replace_bars and not _newer_than(df, fallback):
+            return fallback
+        # 重刷时 merge 基底必须为空：旧库里是不复权价格，混进新序列会前功尽弃。
+        df = _merge_bars(pd.DataFrame() if replace_bars else fallback, df)
         _store_history(stock_code, df)
         return df
     except Exception as exc:
@@ -477,8 +506,11 @@ def check_ma120_signal(df: pd.DataFrame, current_price: float | None = None) -> 
     if len(df) < MA_LONG:
         return None
 
+    # 阈值/首穿判定统一走 ma120_strategy；prev 仍锚在 iloc[-2]，
+    # 这是 11:30 运行时的既有口径（实际是 T-2），刻意不修正。
+    settings = ma120_strategy.Settings(MA_LONG, BUY_THRESHOLD, SELL_THRESHOLD, DATA_DAYS)
     df = df.copy()
-    df["ma120"] = df["close"].rolling(window=MA_LONG).mean()
+    df["ma120"] = df["close"].rolling(window=settings.ma_days).mean()
     latest = df.iloc[-1]
     prev = df.iloc[-2] if len(df) > 1 else latest
 
@@ -491,27 +523,26 @@ def check_ma120_signal(df: pd.DataFrame, current_price: float | None = None) -> 
     prev_price = prev["close"]
     prev_ma120 = prev["ma120"] if not pd.isna(prev["ma120"]) else ma120
 
-    buy_line = round(ma120 * BUY_THRESHOLD, 2)
-    sell_line = round(ma120 * SELL_THRESHOLD, 2)
+    # 判定用未 round 的阈值，展示线才 round(2)。
+    _, _, buy_line, sell_line = ma120_strategy.levels(ma120, settings)
+    signal = ma120_strategy.first_cross(price, ma120, prev_price, prev_ma120, settings)
 
     result = {
         "price": price,
         "ma120": ma120,
         "ma120_pct": ma120_pct,
-        "signal": "hold",
+        "signal": signal,
         "buy_line": buy_line,
         "sell_line": sell_line,
         "message": "",
     }
 
-    if price < ma120 * BUY_THRESHOLD and prev_price >= prev_ma120 * BUY_THRESHOLD:
-        result["signal"] = "buy"
+    if signal == "buy":
         result["message"] = (
             f"🔥 买入：{price:.2f} < 买入线 {buy_line:.2f}  "
             f"MA120 {ma120:.2f}  偏离MA120 {ma120_pct:.2f}%"
         )
-    elif price > ma120 * SELL_THRESHOLD and prev_price <= prev_ma120 * SELL_THRESHOLD:
-        result["signal"] = "sell"
+    elif signal == "sell":
         result["message"] = (
             f"📤 卖出：{price:.2f} > 卖出线 {sell_line:.2f}  "
             f"MA120 {ma120:.2f}  偏离MA120 {ma120_pct:.2f}%"
@@ -579,35 +610,60 @@ def _feishu_payload(message) -> dict:
     return {"msg_type": "text", "content": {"text": str(message)}}
 
 
+def _ping_healthcheck() -> None:
+    """全部卡片推送成功后上报一次心跳；未配置时静默跳过。
+
+    只报「成功」不报「失败」：外部监控发现超过 N 小时没有 ping 就告警，
+    这样连「交易日探测连续误判、脚本根本没走到推送」也能被发现。
+    """
+    url = os.environ.get(HEALTHCHECK_URL_ENV, "").strip() or _read_local_env_value(HEALTHCHECK_URL_ENV)
+    if not url:
+        return
+    log = logging.getLogger(__name__)
+    try:
+        response = requests.get(url, timeout=10)
+        if response.status_code >= 400:
+            log.warning("心跳上报返回 HTTP %s", response.status_code)
+    except Exception as exc:  # noqa: BLE001 - 心跳失败不改变本次监控结论
+        log.warning("心跳上报失败：%s: %s", type(exc).__name__, exc)
+
+
 def send_feishu(message) -> bool:
     webhook_url = _get_feishu_webhook_url()
+    log = logging.getLogger(__name__)
     if not webhook_url:
-        print(f"     ⚠️ 未配置 {FEISHU_WEBHOOK_URL_ENV}，跳过飞书推送")
+        log.warning("未配置 %s，飞书推送跳过（视为失败）", FEISHU_WEBHOOK_URL_ENV)
         return False
 
-    try:
-        response = requests.post(
-            webhook_url,
-            json=_feishu_payload(message),
-            timeout=15,
-        )
-        if response.status_code != 200:
-            print(f"     HTTP {response.status_code}: {response.text[:200]}")
-            return False
-
+    payload = _feishu_payload(message)
+    for attempt in range(1, FEISHU_MAX_ATTEMPTS + 1):
         try:
-            data = response.json()
-        except ValueError:
-            return True
-
-        code = data.get("code", data.get("StatusCode", 0))
-        if code not in (0, "0"):
-            print(f"     飞书返回异常: {str(data)[:200]}")
-            return False
-        return True
-    except Exception as exc:
-        print(f"     ⚠️ 飞书发送异常: {exc}")
-        return False
+            response = requests.post(webhook_url, json=payload, timeout=15)
+            if response.status_code == 200:
+                try:
+                    data = response.json()
+                except ValueError:
+                    return True
+                code = data.get("code", data.get("StatusCode", 0))
+                if code in (0, "0"):
+                    return True
+                log.warning("飞书返回业务异常：%s", str(data)[:200])
+                return False  # 业务错误重试也没用
+            if 400 <= response.status_code < 500:
+                log.warning("飞书 HTTP %s（客户端错误，不重试）：%s",
+                            response.status_code, response.text[:200])
+                return False
+            reason = f"HTTP {response.status_code}: {response.text[:200]}"
+        except Exception as exc:  # noqa: BLE001
+            reason = f"{type(exc).__name__}: {exc}"
+        if attempt < FEISHU_MAX_ATTEMPTS:
+            delay = FEISHU_RETRY_BASE_SECONDS * (2 ** (attempt - 1))
+            log.warning("飞书推送失败（第 %d/%d 次）：%s，%.1fs 后重试",
+                        attempt, FEISHU_MAX_ATTEMPTS, reason, delay)
+            time.sleep(delay)
+        else:
+            log.error("飞书推送最终失败（%d 次）：%s", FEISHU_MAX_ATTEMPTS, reason)
+    return False
 
 
 # ---------- 文本渲染 ----------
@@ -1004,7 +1060,9 @@ def is_trading_day() -> bool:
     （午休时段返回的是上午收盘价）；开盘前取不到价，无法区分
     「还没开盘」和「非交易日」。
     """
-    today = datetime.now().strftime("%Y-%m-%d")
+    # 显式按北京时间取日期：CI runner 是 UTC，服务器虽设了 TZ，
+    # 但 00:00-08:00 用本地 naive 时间会把「今天」算成前一天。
+    today = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
     for code in TRADING_DAY_PROBES:
         quote = get_stock_realtime_quote(code)
         if quote.get("price_source") == "realtime" and quote.get("quote_date") == today:
@@ -1014,12 +1072,13 @@ def is_trading_day() -> bool:
 
 # ---------- 主流程 ----------
 def run(mode: str = "all", feishu: bool = True, skip_non_trading_day: bool = False):
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
     print(f"\n{'=' * 60}\n📊 MA120 监控 · {today}  mode={mode}\n{'=' * 60}")
 
     if skip_non_trading_day and not is_trading_day():
-        print("\n⏭️  今天不是 A 股交易日（探测不到当日实时行情），已跳过监控与飞书推送。")
-        return {"portfolio": [], "watchlist": []}
+        print("\n⏭️  今天不是 A 股交易日（3 支探测标的均未取到当日实时行情），"
+              "已跳过监控与飞书推送；本次不会上报成功心跳。")
+        return {"portfolio": [], "watchlist": [], "push_failures": [], "skipped": True}
 
     portfolio_items = []
     watchlist_items = []
@@ -1055,17 +1114,39 @@ def run(mode: str = "all", feishu: bool = True, skip_non_trading_day: bool = Fal
         for item in watchlist_skipped:
             print(f"  ⚠️ 数据不足: {item['name']} ({item['code']})")
 
-    if feishu and (portfolio_items or watchlist_items):
-        print("\n📨 发送飞书...")
-        if portfolio_items:
-            ok = send_feishu(render_portfolio_card(portfolio_items, today))
-            print(f"  持仓: {'✅' if ok else '⚠️ 失败'}")
-        if watchlist_items:
-            ok = send_feishu(render_watchlist_card(watchlist_items, today))
-            print(f"  关注池: {'✅' if ok else '⚠️ 失败'}")
+    push_failures: list[str] = []
+    if feishu:
+        if not (portfolio_items or watchlist_items):
+            # 行情全失败导致列表为空时，原来连发送都不尝试、却仍算「成功」。
+            push_failures.append("no_data")
+            logging.getLogger(__name__).error("没有可推送的标的，未发送任何飞书卡片")
+        else:
+            print("\n📨 发送飞书...")
+            if portfolio_items:
+                ok = send_feishu(render_portfolio_card(portfolio_items, today))
+                print(f"  持仓: {'✅' if ok else '⚠️ 失败'}")
+                if not ok:
+                    push_failures.append("portfolio")
+            if watchlist_items:
+                ok = send_feishu(render_watchlist_card(watchlist_items, today))
+                print(f"  关注池: {'✅' if ok else '⚠️ 失败'}")
+                if not ok:
+                    push_failures.append("watchlist")
+        if not push_failures:
+            _ping_healthcheck()
 
-    print(f"\n{'=' * 60}\n✅ 完成\n{'=' * 60}\n")
-    return {"portfolio": portfolio_items, "watchlist": watchlist_items}
+    if push_failures:
+        logging.getLogger(__name__).error("本次推送失败项：%s", ", ".join(push_failures))
+        print(f"\n{'=' * 60}\n⚠️ 完成，但推送失败：{', '.join(push_failures)}\n{'=' * 60}\n")
+    else:
+        print(f"\n{'=' * 60}\n✅ 完成\n{'=' * 60}\n")
+    return {"portfolio": portfolio_items, "watchlist": watchlist_items,
+            "push_failures": push_failures, "skipped": False}
+
+
+def _exit_code(result: dict) -> int:
+    """把「推送失败」变成非零退出码，让 systemd timer / CI 不再显示全绿。"""
+    return 1 if (result or {}).get("push_failures") else 0
 
 
 if __name__ == "__main__":
@@ -1085,7 +1166,11 @@ if __name__ == "__main__":
     feishu = "--no-feishu" not in args
     skip_non_trading_day = "--skip-non-trading-day" in args
     try:
-        run(mode=mode, feishu=feishu, skip_non_trading_day=skip_non_trading_day)
+        result = run(mode=mode, feishu=feishu, skip_non_trading_day=skip_non_trading_day)
     except PortfolioError as exc:
         print(f"持仓读取失败：{exc}", file=sys.stderr)
         sys.exit(1)
+    failures = result.get("push_failures") or []
+    if failures:
+        print(f"飞书推送失败：{', '.join(failures)}", file=sys.stderr)
+    sys.exit(_exit_code(result))

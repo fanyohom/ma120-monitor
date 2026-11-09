@@ -1,0 +1,14 @@
+# 安装：sudo cp deploy/ma120-monitor.timer /etc/systemd/system/
+#       sudo systemctl daemon-reload && sudo systemctl enable --now ma120-monitor.timer
+# 查看下次执行：systemctl list-timers ma120-monitor.timer
+[Unit]
+Description=Run MA120 monitor on weekday mornings
+
+[Timer]
+OnCalendar=Mon..Fri 11:30:00
+# 刻意不用 Persistent=true：否则开机补跑会在凌晨推一张「午间信号」的过期卡片。
+Persistent=false
+Unit=ma120-monitor.service
+
+[Install]
+WantedBy=timers.target

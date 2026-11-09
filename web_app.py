@@ -3,6 +3,7 @@
 import argparse
 import json
 import logging
+import os
 import re
 import sqlite3
 import sys
@@ -105,6 +106,19 @@ def lookup_instruments(keyword):
 
 def allowed_request_host(host, port):
     return host.lower() in {f"127.0.0.1:{port}", f"localhost:{port}"}
+
+
+def trusted_origins(host):
+    """写请求的 Origin 白名单。
+
+    默认保持原语义（只认 http://Host）。反向代理终止 TLS 后，浏览器发来的
+    Origin 是 https://...，此时由 nginx 改写 Origin 并在应用侧设置
+    MA120_TRUSTED_ORIGIN=https://<域名>，否则所有写操作会被 403。
+    """
+    configured = os.environ.get("MA120_TRUSTED_ORIGIN", "").strip()
+    if configured:
+        return {value.strip() for value in configured.split(",") if value.strip()}
+    return {f"http://{host}"}
 
 
 def _simulate_buys(plan, settings, series, start):
@@ -457,6 +471,45 @@ class StockDashboardService:
         return build_ma120_dashboard(
             hist_loader=hist,
             quote_loader=lambda code: monitor.get_stock_realtime_quote(code, database_only=True))
+
+    def health(self) -> dict:
+        """只读健康检查：不触发快照重建、不联网，供探活与外部监控使用。
+
+        注意这里刻意不调用 current()：那会在快照过期时起后台刷新，
+        探活请求本身不该改变服务状态。
+        """
+        with self._snapshot_lock:
+            snapshot = self.snapshot
+            refresh_error = self._refresh_error
+        if snapshot is None:
+            return {"status": "starting", "detail": "行情快照尚未构建"}
+        rows = [*snapshot.get("portfolio", []), *snapshot.get("watchlist", [])]
+        problems = []
+        if snapshot.get("source_error"):
+            problems.append(f"数据源异常：{snapshot['source_error']}")
+        if refresh_error:
+            problems.append(f"上次后台刷新失败：{refresh_error}")
+        stale = sum(1 for row in rows if row.get("data_stale"))
+        if not rows:
+            problems.append("监控清单为空")
+        elif stale / len(rows) > 0.5:
+            problems.append(f"{stale}/{len(rows)} 只使用历史行情")
+        try:
+            age = max(0, int((datetime.now(TIMEZONE) - datetime.fromisoformat(
+                snapshot["generated_at"])).total_seconds()))
+        except (KeyError, TypeError, ValueError):
+            age = None
+        if age is not None and age > 3600:
+            problems.append(f"快照已 {age} 秒未更新")
+        return {
+            "status": "degraded" if problems else "ok",
+            "generated_at": snapshot.get("generated_at"),
+            "age_seconds": age,
+            "portfolio_count": len(snapshot.get("portfolio", [])),
+            "watchlist_count": len(snapshot.get("watchlist", [])),
+            "stale_rows": stale,
+            "problems": problems,
+        }
 
     def _snapshot_expired(self) -> bool:
         if not self.database_mode or self.snapshot is None:
@@ -832,11 +885,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
         path = parsed.path
         if path not in ("/api/dashboard", "/api/history", "/api/estimate", "/api/ma120", "/api/configuration",
                         "/api/ma120/history", "/api/ma120/estimate", "/api/ma120/watchlist",
-                        "/api/ma120/lookup"):
+                        "/api/ma120/lookup", "/api/health"):
             self._static(path)
             return
         try:
-            if path == "/api/configuration":
+            if path == "/api/health":
+                self._json(200, self.stock_service.health())
+            elif path == "/api/configuration":
                 self._json(200, self.configuration_service.current())
             elif path == "/api/ma120":
                 self._json(200, self.stock_service.current())
@@ -875,7 +930,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._json(403, {"error": "仅允许本机访问"})
             return False
         origin = self.headers.get("Origin")
-        if origin and origin != f"http://{self.headers.get('Host')}":
+        if origin and origin not in trusted_origins(self.headers.get("Host", "")):
             self._json(403, {"error": "跨站请求已拒绝"})
             return False
         return True

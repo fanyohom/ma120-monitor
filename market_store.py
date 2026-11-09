@@ -281,15 +281,22 @@ class MarketStore:
         db.execute(f"DELETE FROM history_versions WHERE id IN ({marks})", stale)
         return len(stale)
 
-    def prune_history(self, keep=None):
-        """按标的批量清理历史版本（供一次性瘦身或定期维护调用）。"""
+    def prune_history(self, keep=None, kind=None, code=None):
+        """清理历史版本（供一次性瘦身、口径重刷或定期维护调用）。
+
+        同时给出 kind 与 code 时只处理该标的，用于「重刷成功后立刻清掉
+        旧口径版本」，避免任何读取路径再取到不复权价格。
+        """
         keep = self.KEEP_VERSIONS if keep is None else keep
         removed = 0
         with self.write() as db:
-            pairs = [(row[0], row[1]) for row in db.execute(
-                "SELECT DISTINCT kind, code FROM history_versions")]
-            for kind, code in pairs:
-                removed += self._prune_versions(db, kind, code, keep)
+            if kind and code:
+                pairs = [(kind, code)]
+            else:
+                pairs = [(row[0], row[1]) for row in db.execute(
+                    "SELECT DISTINCT kind, code FROM history_versions")]
+            for pair_kind, pair_code in pairs:
+                removed += self._prune_versions(db, pair_kind, pair_code, keep)
         return removed
 
     def get_history(self, kind, code, min_rows=1, longest=False):

@@ -51,8 +51,40 @@ function refreshFeedback(message, error = false) {
   status.hidden = !message;
 }
 
-async function request(path, post = false) {
-  const response = await fetch(path, post ? {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'} : {});
+async function request(path, post = false, timeoutMs = 30000, externalSignal = null) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const relay = () => controller.abort();
+  if (externalSignal) {
+    if (externalSignal.aborted) controller.abort();
+    else externalSignal.addEventListener('abort', relay, {once: true});
+  }
+  const options = post
+    ? {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'}
+    : {};
+  options.signal = controller.signal;
+  let response;
+  try {
+    response = await fetch(path, options);
+  } catch (error) {
+    if (error.name === 'AbortError') {
+      throw new Error(externalSignal?.aborted
+        ? '请求已取消'
+        : `请求超时（${Math.round(timeoutMs / 1000)} 秒），请稍后重试`);
+    }
+    throw new Error(`网络请求失败：${error.message}`);
+  } finally {
+    clearTimeout(timer);
+    if (externalSignal) externalSignal.removeEventListener('abort', relay);
+  }
+  // nginx 的 401/502/504 会返回 HTML，直接 response.json() 会把
+  // "Unexpected token '<'" 抛给用户，这里按状态码给出可操作的提示。
+  const type = response.headers.get('content-type') || '';
+  if (!type.includes('application/json')) {
+    if (response.status === 401) throw new Error('登录已过期，请刷新页面重新认证');
+    if (response.status === 403) throw new Error('访问被拒绝，请检查登录与访问来源');
+    throw new Error(`服务暂时不可用（HTTP ${response.status}），请稍后重试`);
+  }
   const result = await response.json();
   if (!response.ok) throw new Error(result.error || '读取失败');
   return result;
@@ -883,7 +915,7 @@ async function refresh() {
   button.textContent = '正在获取...';
   refreshFeedback('正在重新读取股票日 K 和报价...');
   try {
-    const result = await request('/api/ma120/refresh', true);
+    const result = await request('/api/ma120/refresh', true, 60000);
     stockHistoryCache.clear();
     render(result.snapshot);
     const rows = [...result.snapshot.portfolio, ...result.snapshot.watchlist];
@@ -892,7 +924,7 @@ async function refresh() {
     refreshFeedback(`已更新 ${rows.length} 只股票${latest ? `（最新行情 ${latest}）` : ''}；今日买入信号 ${summary.buy_signals}、卖出信号 ${summary.sell_signals}${summary.data_unavailable ? `，${summary.data_unavailable} 只数据待补` : ''}。只读测算，未推送或下单。`);
   } catch (error) {
     notice(`刷新失败：${error.message}`, true);
-    refreshFeedback(`刷新失败：${error.message}`, true);
+    refreshFeedback(`刷新失败：${error.message}。可点击「↻ 刷新行情」重试。`, true);
     showInitialDetailError(error.message);
   } finally {
     button.disabled = false;
@@ -936,64 +968,117 @@ $('markStarred').addEventListener('change', (event) => {
 // ---- 新增关注池：名称/拼音联想，免去手输代码 ----
 let suggestTimer = null;
 let suggestSeq = 0;
+let suggestController = null;
+let suggestActive = -1;
+let suggestItems = [];
 
-function hideSuggest() {
+// 所有「关闭下拉」的路径都必须走这里：递增序号 + 取消在途请求。
+// 只 hidden 不递增时，清空输入框后旧请求返回仍会弹出过期下拉。
+function invalidateSuggest() {
+  suggestSeq += 1;
+  clearTimeout(suggestTimer);
+  if (suggestController) {
+    suggestController.abort();
+    suggestController = null;
+  }
+  suggestActive = -1;
+  suggestItems = [];
   const box = $('watchlistSuggest');
   box.hidden = true;
-  box.innerHTML = '';
+  box.replaceChildren();
+  const input = $('watchlistName');
+  input.setAttribute('aria-expanded', 'false');
+  input.removeAttribute('aria-activedescendant');
+}
+
+function hideSuggest() { invalidateSuggest(); }
+
+function setActiveSuggest(next) {
+  const options = [...$('watchlistSuggest').querySelectorAll('[role="option"]')];
+  if (!options.length) return;
+  suggestActive = (next + options.length) % options.length;
+  options.forEach((option, index) => {
+    const active = index === suggestActive;
+    option.setAttribute('aria-selected', String(active));
+    option.classList.toggle('active', active);
+  });
+  $('watchlistName').setAttribute('aria-activedescendant', options[suggestActive].id);
+  options[suggestActive].scrollIntoView({block: 'nearest'});
+}
+
+function chooseSuggest(index) {
+  const item = suggestItems[index];
+  if (!item) return;
+  $('watchlistName').value = item.name;
+  $('watchlistCode').value = item.code;
+  hideSuggest();
+  $('watchlistCode').focus();
 }
 
 function renderSuggest(items) {
   const box = $('watchlistSuggest');
-  box.innerHTML = '';
+  box.replaceChildren();
+  suggestItems = items;
+  suggestActive = -1;
   if (!items.length) {
     const empty = document.createElement('div');
     empty.className = 'sug-empty';
     empty.textContent = '没找到匹配的股票，可以直接填代码';
     box.appendChild(empty);
-    box.hidden = false;
-    return;
-  }
-  items.forEach((item) => {
-    const button = document.createElement('button');
-    button.type = 'button';
-    const label = document.createElement('span');
-    label.textContent = item.name;
-    const code = document.createElement('span');
-    code.className = 'sug-code';
-    code.textContent = item.code;
-    button.append(label, code);
-    button.addEventListener('click', () => {
-      $('watchlistName').value = item.name;
-      $('watchlistCode').value = item.code;
-      hideSuggest();
-      $('watchlistAdd').querySelector('button[type="submit"]').focus();
+  } else {
+    items.forEach((item, index) => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.id = `watchlistSuggestOption${index}`;
+      button.setAttribute('role', 'option');
+      button.setAttribute('aria-selected', 'false');
+      const label = document.createElement('span');
+      label.textContent = item.name;
+      const code = document.createElement('span');
+      code.className = 'sug-code';
+      code.textContent = item.code;
+      button.append(label, code);
+      button.addEventListener('click', () => chooseSuggest(index));
+      box.appendChild(button);
     });
-    box.appendChild(button);
-  });
+  }
   box.hidden = false;
+  $('watchlistName').setAttribute('aria-expanded', 'true');
 }
 
-async function lookupStock(query) {
-  const result = await request(`/api/ma120/lookup?q=${encodeURIComponent(query)}`);
+async function lookupStock(query, signal = null) {
+  const result = await request(`/api/ma120/lookup?q=${encodeURIComponent(query)}`, false, 8000, signal);
   return result.items || [];
 }
 
 $('watchlistName').addEventListener('input', () => {
   const query = $('watchlistName').value.trim();
-  clearTimeout(suggestTimer);
-  if (!query) { hideSuggest(); return; }
-  suggestSeq += 1;
+  invalidateSuggest();
+  if (!query) return;
   const seq = suggestSeq;
+  const controller = new AbortController();
+  suggestController = controller;
   suggestTimer = setTimeout(async () => {
     try {
-      const items = await lookupStock(query);
-      if (seq !== suggestSeq) return;   // 只认最后一次输入的结果
+      const items = await lookupStock(query, controller.signal);
+      if (seq !== suggestSeq || controller.signal.aborted) return;
       renderSuggest(items);
     } catch (error) {
-      hideSuggest();
+      if (seq === suggestSeq && !controller.signal.aborted) hideSuggest();
     }
   }, 250);
+});
+
+$('watchlistName').addEventListener('keydown', (event) => {
+  const box = $('watchlistSuggest');
+  if (event.key === 'Escape') { invalidateSuggest(); return; }
+  if (box.hidden) return;
+  if (event.key === 'ArrowDown') { event.preventDefault(); setActiveSuggest(suggestActive + 1); }
+  else if (event.key === 'ArrowUp') { event.preventDefault(); setActiveSuggest(suggestActive - 1); }
+  else if (event.key === 'Enter' && suggestActive >= 0) {
+    event.preventDefault();
+    chooseSuggest(suggestActive);
+  }
 });
 
 $('watchlistCode').addEventListener('input', () => {
@@ -1045,5 +1130,30 @@ window.addEventListener('resize', () => {
   if (cached && !$('stockDetail').hidden) drawStockChart(cached);
 });
 applyRoute();
-request('/api/ma120').then((result) => { if (result.snapshot) render(result.snapshot); else notice('数据库暂无行情，请点击刷新行情获取数据。', true); })
-  .catch((error) => { notice(`读取失败：${error.message}`, true); showInitialDetailError(error.message); });
+
+// 初始加载失败时不能让表格永远停在「正在读取清单...」，给一个可操作的重试入口。
+function showLoadError(message) {
+  notice(`读取失败：${message}`, true);
+  const cell = document.createElement('td');
+  cell.colSpan = 9;
+  cell.className = 'empty-row';
+  cell.textContent = '清单读取失败　';
+  const retry = document.createElement('button');
+  retry.type = 'button';
+  retry.className = 'outline-btn';
+  retry.textContent = '重试';
+  retry.addEventListener('click', loadDashboard);
+  cell.append(retry);
+  const row = document.createElement('tr');
+  row.append(cell);
+  $('stockRows').replaceChildren(row);
+  showInitialDetailError(message);
+}
+
+function loadDashboard() {
+  request('/api/ma120').then((result) => {
+    if (result.snapshot) { notice(''); render(result.snapshot); return; }
+    showLoadError('数据库暂无行情，请刷新行情获取数据。');
+  }).catch((error) => showLoadError(error.message));
+}
+loadDashboard();

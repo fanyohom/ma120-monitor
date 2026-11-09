@@ -38,8 +38,12 @@ def last_bars(code, n):
 
 
 stocks = [(item["code"], item["name"]) for item in load_watchlist()]
-import stock_dynamic_monitor as monitor
-MA_LONG, BUY_THRESHOLD, SELL_THRESHOLD = monitor.MA_LONG, monitor.BUY_THRESHOLD, monitor.SELL_THRESHOLD
+# 参数源统一到 ma120_strategy（数据库 ma120_settings），
+# 不再靠「先 load_watchlist() 触发 monitor 全局覆盖、再二次赋值」的隐式顺序。
+import ma120_strategy
+_settings = ma120_strategy.load_settings()
+MA_LONG, BUY_THRESHOLD, SELL_THRESHOLD = (
+    _settings.ma_days, _settings.buy_factor, _settings.sell_factor)
 
 rows = []
 for code, name in stocks:
@@ -49,7 +53,8 @@ for code, name in stocks:
         continue
     prev_close = tail[-1][1]
     prev_date = tail[-1][0]
-    ma120 = sum(c for _, c in tail) / MA_LONG
+    ma120 = ma120_strategy.moving_average([c for _, c in tail], MA_LONG)
+    buy_line, sell_line, _, _ = ma120_strategy.levels(ma120, _settings)
     q = get_stock_realtime_quote(code)
     price = q.get("price") if q else None
     live = price is not None and price > 0
@@ -59,7 +64,7 @@ for code, name in stocks:
     rows.append({
         "name": name, "code": code, "price": price, "chg": chg,
         "ma120": ma120, "dev": (price - ma120) / ma120 * 100,
-        "buy": ma120 * BUY_THRESHOLD, "sell": ma120 * SELL_THRESHOLD,
+        "buy": buy_line, "sell": sell_line,
         "live": live, "prev_close": prev_close, "prev_date": prev_date,
         "t": (q or {}).get("quote_time", ""),
     })

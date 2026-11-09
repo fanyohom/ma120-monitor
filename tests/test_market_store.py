@@ -319,11 +319,13 @@ class ConcurrentWriteTests(unittest.TestCase):
                 "attempt to write a readonly database")):
             with patch.object(monitor, "_read_cache", return_value=None):
                 with patch.object(monitor, "requests") as fake_requests:
-                    fake_requests.get.return_value.json.return_value = [
-                        {"day": d.date().isoformat(), "open": "10", "close": "10.5",
-                         "high": "11", "low": "9", "vol": "1000"}
-                        for d in pd.bdate_range(end=date(2026, 10, 21), periods=130)
-                    ]
+                    # 2026-11-09 起 A 股日 K 统一走腾讯 fqkline(qfq)。
+                    fake_requests.get.return_value.json.return_value = {
+                        "data": {"sh600000": {"qfqday": [
+                            [d.date().isoformat(), "10", "10.5", "11", "9", "1000"]
+                            for d in pd.bdate_range(end=date(2026, 10, 21), periods=130)
+                        ]}}
+                    }
                     result = monitor.get_stock_hist_data("600000", days=130, force=True)
         self.assertEqual(len(result), 130)
         self.assertFalse(result.attrs.get("data_stale", False))
