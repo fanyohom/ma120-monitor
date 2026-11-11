@@ -16,6 +16,7 @@
 .stock-star{display:inline-block;color:#c8912f;font-size:11px;margin-right:4px;vertical-align:1px}
 .stock-star-off{color:#c6cfcc}
 .stock-note{display:block;margin-top:5px;color:#8a6d33;font-size:10px;line-height:1.45;max-width:190px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.stock-note-muted{color:#8a9698}
 .stock-starred-row{background:#fdfaf2}
 .stock-table tbody tr.stock-starred-row:hover{background:#faf4e6}
 .stock-mark-btn{border:0;background:transparent;padding:0 2px;cursor:pointer;font-size:13px;line-height:1;color:#c6cfcc}

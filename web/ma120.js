@@ -512,9 +512,11 @@ function renderRows() {
     section.className = 'stock-section';
     section.textContent = item.section === 'portfolio' ? '持仓' : '关注';
     nameCell.append(name, code, section);
-    if (item.starred && item.note) {
+    // 备注不再要求必须星标：非星标的备注（如「机器人·概念」）也要能看见，
+    // 用灰色区分，避免和「特殊关注」的金色备注混淆。
+    if (item.note) {
       const note = document.createElement('span');
-      note.className = 'stock-note';
+      note.className = `stock-note${item.starred ? '' : ' stock-note-muted'}`;
       note.textContent = item.note;
       note.title = item.note;
       nameCell.append(note);
